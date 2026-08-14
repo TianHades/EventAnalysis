@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Data & artifacts
+reports/*.md
+!reports/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+data/
+cache/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eventreplay"
+version = "0.1.0"
+description = "重大事件复盘分析系统 - Phase 1 复盘 MVP"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "akshare>=1.18",
+  "pandas>=2.0",
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "pydantic>=2.0",
+  "typer>=0.9",
+  "tenacity>=8.0",
+  "python-dotenv>=1.0",
+  "pyyaml>=6.0",
+  "jieba>=0.42",
+  "tushare>=1.4",
+  "sentence-transformers>=2.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-mock>=3"]
+
+[project.scripts]
+eventreplay = "eventreplay.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

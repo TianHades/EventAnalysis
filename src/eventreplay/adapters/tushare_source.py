@@ -31,6 +31,13 @@ class ConstituentSource(Protocol):
         ...
 
 
+# L1 子串匹配黑名单：常用泛词与申万一级行业名撞车时会把成分股注入一切含该词的
+# 文本（"综合"命中所有"综合分析/综合评估"类节点文本）。
+# 已知残留风险词（"汽车/环保/社会服务"等两字行业名）刻意不拉黑：
+# 如"新能源汽车"命中"汽车"是正当召回，无分词边界无法两全——已知局限，接受误召回。
+_L1_BLACKLIST = {"综合"}
+
+
 class TushareSource:
     """申万三级行业成分股（index_classify + index_member）。"""
 
@@ -73,11 +80,15 @@ class TushareSource:
         return result
 
     def _build_reverse_map(self) -> None:
-        """从 L3 classify + member cache 建 code → 三级行业名 反向映射。"""
+        """从 L3 classify + member 建 code → 三级行业名 反向映射。
+
+        经 self._members 懒拉取（首机无磁盘缓存时在线补；直接读 _member_cache
+        会拿到空 set，导致 L3 静默降级 L1 且进程内永不恢复）。
+        """
         self._reverse_map = {}
         for ind in self._load_l3():
             ic, name = ind["index_code"], ind["industry_name"]
-            for code in self._member_cache.get(ic, set()):
+            for code in self._members(ic):
                 if code not in self._reverse_map:  # 首个行业优先（跨行业标的罕见）
                     self._reverse_map[code] = name
 
@@ -265,9 +276,9 @@ class TushareSource:
             if len(name) >= 2 and name in text:
                 for code in self._members(ind["index_code"]):
                     out.append({"code": code, "theme": f"申万:{name}"})
-        # 一级行业名匹配（兜底：chain 常用 l1 名）
+        # 一级行业名匹配（兜底：chain 常用 l1 名；黑名单泛词跳过）
         for l1_name, ic in self.industry_index_codes().items():
-            if len(l1_name) >= 2 and l1_name in text:
+            if len(l1_name) >= 2 and l1_name in text and l1_name not in _L1_BLACKLIST:
                 for code in self._members(ic):
                     out.append({"code": code, "theme": f"申万L1:{l1_name}"})
         return out

@@ -7,13 +7,13 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import date
-from typing import Any
+from datetime import date, timedelta
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from ...llm import Reasoner
-from ...schema import CandidateEvent, Event, ImpactDirection, ShockDimension
+from ...schema import AnnouncementTime, CandidateEvent, Event, ImpactDirection, ShockDimension
 from ...schema.news import NewsItem
 from ..event_dedup import make_dedup_key
 from .base import LLMNode
@@ -27,6 +27,7 @@ class _EventExtractOut(BaseModel):
     description: str
     announcement_date: str  # YYYY-MM-DD
     reaction_date: str | None = None
+    announcement_time: Literal["盘前", "盘中", "盘后", "非交易日"] | None = None
     key_entities: list[str] = Field(default_factory=list)
     industries: list[str] = Field(default_factory=list)
     significance: int  # 1-4
@@ -70,7 +71,8 @@ class EventExtractor(LLMNode):
             "   **注意**：已充分预期/已定价的事件，即使本身重要，对股价的边际影响也应下调（3→2→1）。\n"
             "⑦ 事件结构化：event_type / shock_dimension(供给/需求/政策/流动性/情绪) / "
             "impact_direction(利好/利空/中性/混合) / description / announcement_date(YYYY-MM-DD) / "
-            "reaction_date / key_entities / industries\n"
+            "reaction_date / announcement_time(盘前/盘中/盘后/非交易日：公告发布时点，"
+            "盘后=当日15:00后、非交易日=周末或节假日发布) / key_entities / industries\n"
             "只输出 JSON。"
         )
 
@@ -89,11 +91,13 @@ class EventExtractor(LLMNode):
         return "\n".join(parts)
 
     def post_process(self, llm_output: _EventExtractOut, inputs: dict[str, Any]) -> CandidateEvent | None:
-        """is_event=False → None（过滤噪音）；否则 → CandidateEvent（含 dedup_key）。"""
+        """is_event=False → None（过滤噪音）；日期不可得 → None（宁缺毋滥）；否则 → CandidateEvent。"""
         if not llm_output.is_event:
             return None
         news: NewsItem = inputs["news"]
-        event = self._build_event(llm_output)
+        event = self._build_event(llm_output, news)
+        if event is None:
+            return None
         dedup_key = make_dedup_key(
             event.event_type, str(event.announcement_date), event.key_entities,
             description=event.description,
@@ -112,7 +116,9 @@ class EventExtractor(LLMNode):
         )
 
     @staticmethod
-    def _build_event(out: _EventExtractOut) -> Event:
+    def _build_event(out: _EventExtractOut, news: NewsItem | None = None) -> Event | None:
+        """LLM 输出 → Event。日期回退链：LLM日期 → news.published_at.date() → None（丢弃，不虚构 today）。"""
+
         def _parse(d: str | None) -> date | None:
             if not d:
                 return None
@@ -122,10 +128,18 @@ class EventExtractor(LLMNode):
                 return None
 
         ann = _parse(out.announcement_date)
-        react = _parse(out.reaction_date) or ann
+        react = _parse(out.reaction_date)
+        if ann is None and news is not None and news.published_at is not None:
+            ann = news.published_at.date()  # 真实来源兜底
         if ann is None:
-            # LLM 返回非法日期时兜底（与 historical_miner 一致），避免 Event 校验崩溃
-            ann = react = date.today()
+            return None  # 日期不可得 → 丢弃（宁缺毋滥）
+        if react is None:
+            # 盘后/非交易日公告 → 首个反应日为公告日次日（event_study t0 对齐再推到下一交易日）
+            react = ann + timedelta(days=1) if out.announcement_time in ("盘后", "非交易日") else ann
+        try:
+            at = AnnouncementTime(out.announcement_time) if out.announcement_time else None
+        except ValueError:
+            at = None
         try:
             sd = ShockDimension(out.shock_dimension) if out.shock_dimension else None
         except ValueError:
@@ -141,6 +155,7 @@ class EventExtractor(LLMNode):
             description=out.description,
             announcement_date=ann,
             reaction_date=react,
+            announcement_time=at,
             event_type=out.event_type,
             shock_dimension=sd,
             impact_direction=idir,

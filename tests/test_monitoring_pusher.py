@@ -63,6 +63,13 @@ class FakeChannel:
         return True
 
 
+class FailChannel:
+    """push 恒失败（模拟企微/飞书 webhook 挂）。"""
+
+    def push(self, *, title, markdown, event):
+        return False
+
+
 def test_pushes_high_significance(tmp_path):
     """sig/a_share 达标才推送。"""
     dedup = EventDedup(Storage(tmp_path / "t.db"))
@@ -111,7 +118,8 @@ def test_forward_failure_continues_and_not_marked(tmp_path):
     pushed = pusher.run_once(echo=lambda x: None)
     assert pushed == 1  # 只 k2
     assert "k1" not in ch.pushed
-    assert not dedup.is_seen("k1")  # k1 失败不标记，下次重试
+    # k1 forward 失败不标 push（下次重试）；identified 标记（上下文闭环）不算已处理
+    assert not dedup.is_seen("k1", purpose="push")
 
 
 def test_low_a_share_filtered(tmp_path):
@@ -165,3 +173,118 @@ def test_low_impact_filtered(tmp_path):
     })
     pusher = MonitoringPusher(news, extractor, FakeForward(), dedup, [FakeChannel()])
     assert pusher.run_once(impact_min=3, echo=lambda x: None) == 0  # impact_scale=2 < 3
+
+
+# ---- Fix 2: fetch_latest 失败不崩溃 ----
+
+
+def test_fetch_latest_failure_returns_zero(tmp_path):
+    """新闻源挂了 → echo 原因、return 0，不抛异常（run_once 可被 monitor 循环持续调用）。"""
+    dedup = EventDedup(Storage(tmp_path / "t.db"))
+
+    class DeadNews:
+        def fetch_latest(self):
+            raise RuntimeError("akshare 接口超时")
+
+    msgs: list[str] = []
+    pusher = MonitoringPusher(DeadNews(), FakeExtractor({}), FakeForward(), dedup, [FakeChannel()])
+    assert pusher.run_once(echo=msgs.append) == 0
+    assert any("采集失败" in m for m in msgs), "应输出失败原因"
+
+
+# ---- Fix 3: archive 渠道不架空"全失败不标 seen" ----
+
+
+def test_realtime_fail_file_ok_not_marked_seen(tmp_path):
+    """实时渠道（webhook）全挂 + FileChannel 落盘成功 → 不 mark_seen（下次重试）。"""
+    from eventreplay.pipeline.push_channel import FileChannel
+
+    dedup = EventDedup(Storage(tmp_path / "t.db"))
+    news = FakeNews([_news(1)])
+    extractor = FakeExtractor({"n1": _cand("k1", sig=4, a_share=5)})
+    fwd = FakeForward()
+    out_dir = tmp_path / "mon"
+    pusher = MonitoringPusher(news, extractor, fwd, dedup, [FailChannel(), FileChannel(out_dir)])
+    pushed = pusher.run_once(echo=lambda x: None)
+    assert pushed == 0, "archive 成功不算推送成功"
+    assert not dedup.is_seen("k1", purpose="push"), "不得标记 seen（下次重试）"
+    assert list(out_dir.glob("*.md")), "archive 渠道仍应落盘"
+
+
+def test_archive_only_channel_still_counts(tmp_path):
+    """只配置 archive 渠道时，以其为准（仍能标记 seen，事件不丢）。"""
+    from eventreplay.pipeline.push_channel import FileChannel
+
+    dedup = EventDedup(Storage(tmp_path / "t.db"))
+    news = FakeNews([_news(1)])
+    extractor = FakeExtractor({"n1": _cand("k1", sig=4, a_share=5)})
+    pusher = MonitoringPusher(news, extractor, FakeForward(), dedup, [FileChannel(tmp_path / "mon")])
+    assert pusher.run_once(echo=lambda x: None) == 1
+    assert dedup.is_seen("k1", purpose="push")
+
+
+# ---- Fix 10: identified 上下文闭环 ----
+
+
+def test_identified_below_threshold_marked_for_context(tmp_path):
+    """识别但未达推送阈值的事件 → mark_seen(purpose='identified')，进入后续上下文。"""
+    dedup = EventDedup(Storage(tmp_path / "t.db"))
+    news = FakeNews([_news(1)])
+    extractor = FakeExtractor({"n1": _cand("k1", sig=2, a_share=2)})  # 低于阈值
+    pusher = MonitoringPusher(news, extractor, FakeForward(), dedup, [FakeChannel()])
+    pusher.run_once(echo=lambda x: None)
+    assert dedup.is_seen("k1", purpose="identified"), "识别到的事件应记入 identified"
+    assert not dedup.is_seen("k1", purpose="push"), "未推送不得标 push"
+    # 下一轮上下文应含该事件描述
+    ctx = MonitoringPusher.__new__(MonitoringPusher)
+    ctx.dedup = dedup
+    assert "事件k1" in ctx._build_recent_context(echo=lambda *_: None)
+
+
+def test_build_recent_context_reads_push_and_identified(tmp_path):
+    """recent_context 同时读 push + identified 两个 purpose。"""
+    from datetime import datetime as _dt
+
+    st = Storage(tmp_path / "t.db")
+    st._conn.execute(
+        "INSERT INTO seen_events(dedup_key, source, payload, seen_at, purpose) VALUES (?,?,?,?,?)",
+        ("kp", "news", '{"description": "已推送事件"}', "2026-08-02T00:00:00", "push"),
+    )
+    st._conn.execute(
+        "INSERT INTO seen_events(dedup_key, source, payload, seen_at, purpose) VALUES (?,?,?,?,?)",
+        ("ki", "news", '{"description": "已识别事件"}', "2026-08-01T00:00:00", "identified"),
+    )
+    st._conn.commit()
+    pusher = MonitoringPusher.__new__(MonitoringPusher)
+    pusher.dedup = EventDedup(st)
+    ctx = pusher._build_recent_context(echo=lambda *_: None)
+    assert "已推送事件" in ctx and "已识别事件" in ctx
+
+
+# ---- Fix 2: monitor 主循环异常恢复 ----
+
+
+def test_monitor_loop_survives_run_once_exception(tmp_path):
+    """run_once 抛异常 → 主循环 echo 后继续（不退出），下轮正常执行。"""
+    from eventreplay.pipeline.monitoring_pusher import run_monitor_loop
+
+    calls = {"n": 0}
+
+    class FlakyPusher:
+        def run_once(self, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("SQLite 数据库被锁")
+            return 0
+
+    def fake_sleep(_s):
+        if calls["n"] >= 2:
+            raise KeyboardInterrupt  # 第二轮后结束循环
+
+    msgs: list[str] = []
+    import pytest
+
+    with pytest.raises(KeyboardInterrupt):
+        run_monitor_loop(FlakyPusher(), interval_min=0, echo=msgs.append, sleep=fake_sleep)
+    assert calls["n"] >= 2, "首轮异常后循环必须继续"
+    assert any("本轮执行异常" in m for m in msgs)

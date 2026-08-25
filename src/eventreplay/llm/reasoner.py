@@ -159,7 +159,9 @@ class ClaudeCodeProvider:
         """纯文本输出（claude -p 默认 text，无 JSON schema）。
 
         用于产物为大段 markdown 的节点（如 ReportNode），避免长 markdown 嵌 JSON 的
-        转义/截断开销。失败按 max_retries 重试（网关偶发超时），耗尽抛 LLMNodeFailed。
+        转义/截断开销。失败按 max_retries 重试（网关偶发超时/空输出），耗尽抛
+        LLMNodeFailed。returncode=0 但 stdout 为空（网关偶发）同样视为失败触发
+        重试——ReportNode 有模板兜底，但其它调用方不应把空串当成功。
         """
         use_model = model or self.model_alias
         prompt = f"{system}\n\n---\n\n{user}"
@@ -180,6 +182,9 @@ class ClaudeCodeProvider:
                 continue
             if proc.returncode != 0:
                 last_err = f"claude 退出码 {proc.returncode}: {proc.stderr.strip()[:300]}"
+                continue
+            if not proc.stdout.strip():
+                last_err = "claude 返回空 stdout"
                 continue
             return proc.stdout
         raise LLMNodeFailed(f"call_text 重试 {self.max_retries + 1} 次仍失败: {last_err}")

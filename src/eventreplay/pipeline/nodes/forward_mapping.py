@@ -139,17 +139,57 @@ class ForwardMappingNode(LLMNode):
         )
 
     def _build_preds(
-        self, preds: list[_PredictedStockOut], pattern_ids: list[str]
+        self,
+        preds: list[_PredictedStockOut],
+        pattern_ids: list[str],
+        *,
+        side: StockDirection,
+        errors: list[str] | None = None,
     ) -> list[ForwardPrediction]:
+        """LLM 预测 → ForwardPrediction（反幻觉：名称优先 + code/name 错配丢弃 + 侧别校验）。"""
         out: list[ForwardPrediction] = []
         for p in preds:
-            resolved = self.sm.resolve(p.code) or self.sm.resolve(p.name)
-            if resolved is None:
-                continue
             try:
                 d = StockDirection(p.direction)
             except ValueError:
                 continue
+            if d != side:
+                # 子调用侧别校验：beneficiary 调用返回"受损"标的不得原样进受益池
+                if errors is not None:
+                    errors.append(
+                        f"方向侧别不符丢弃: {p.code}/{p.name} direction={p.direction}（本次子调用为{side.value}侧）"
+                    )
+                continue
+
+            by_name = self.sm.resolve(p.name) if p.name else None
+            by_code = self.sm.resolve(p.code) if p.code else None
+            resolved = by_name or by_code  # 名称优先
+            if resolved is None:
+                if errors is not None:
+                    errors.append(f"反查失败丢弃: code={p.code} name={p.name}")
+                continue
+
+            def _related(a: str, b: str) -> bool:
+                return bool(a and b) and (a in b or b in a)
+
+            mismatch = (
+                by_name is not None
+                and by_code is not None
+                and by_code.code != by_name.code
+                and not _related(resolved.name, p.name)
+            ) or (
+                by_name is None
+                and by_code is not None
+                and not _related(resolved.name, p.name)
+            )
+            if mismatch:
+                # code/name 指向不同标的且名称与解析名无包含关系 → 幻觉错配，丢弃
+                if errors is not None:
+                    errors.append(
+                        f"代码-名称错配丢弃: code={p.code}→{by_code.code}/{by_code.name} 与 name={p.name} 不一致"
+                    )
+                continue
+
             out.append(
                 ForwardPrediction(
                     stock_id=resolved.code,
@@ -178,7 +218,8 @@ class ForwardMappingNode(LLMNode):
         user = self.build_user(inputs)
         benef, benef_err = self._call_with_retry(self._benef_system(), user, _BenefOut)
         vict, vict_err = self._call_with_retry(self._vict_system(), user, _VictOut)
-        pattern_ids = [p.source_replay_id for p in inputs.get("patterns", [])]
+        # source_pattern_ids 装 pattern 自身 id（pat-xxx，检索/溯源用），非 source_replay_id
+        pattern_ids = [p.id for p in inputs.get("patterns", [])]
 
         logic_parts: list[str] = []
         if benef and benef.transmission_logic:
@@ -195,8 +236,16 @@ class ForwardMappingNode(LLMNode):
 
         return ForwardMappingResult(
             transmission_logic=logic,
-            beneficiary_predictions=self._build_preds(benef.beneficiaries, pattern_ids) if benef else [],
-            victim_predictions=self._build_preds(vict.victims, pattern_ids) if vict else [],
+            beneficiary_predictions=(
+                self._build_preds(benef.beneficiaries, pattern_ids, side=StockDirection.BENEFICIARY, errors=errors)
+                if benef
+                else []
+            ),
+            victim_predictions=(
+                self._build_preds(vict.victims, pattern_ids, side=StockDirection.VICTIM, errors=errors)
+                if vict
+                else []
+            ),
             confidence=benef.confidence if benef else "低（推理失败）",
             key_risks=benef.key_risks if benef else "",
             errors=errors,

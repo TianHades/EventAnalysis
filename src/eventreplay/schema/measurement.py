@@ -36,6 +36,7 @@ class ImpactMeasurement(BaseModel):
     car_industry_0_60: float | None = None
     car_industry_0_90: float | None = None
     peak_ar: float | None = None
+    trough_ar: float | None = None  # 事件窗最小 AR（受损标的谷值，与 peak_ar 对偶）
     max_drawdown: float | None = None
     limit_up_days: int = 0
     limit_down_days: int = 0

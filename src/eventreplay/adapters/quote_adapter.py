@@ -20,10 +20,12 @@ from typing import Protocol
 import pandas as pd
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
+
+from ._net import call_with_timeout, network_retry_predicate
 
 
 def to_sina_symbol(code: str) -> str:
@@ -70,30 +72,11 @@ def _cache_key(*parts: str) -> str:
     return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
 
 
-def _call_with_timeout(func, kwargs: dict, timeout: int = 60):
-    """daemon 线程包装 akshare 调用，超时抛 TimeoutError（避免 sina 网络挂起卡死整个 replay）。"""
-    import threading
-
-    box: dict = {"result": None, "exc": None}
-
-    def _run() -> None:
-        try:
-            box["result"] = func(**kwargs)
-        except Exception as e:
-            box["exc"] = e
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    t.join(timeout=timeout)
-    if t.is_alive():
-        raise TimeoutError(f"{getattr(func, '__name__', 'akshare')} 超时({timeout}s)")
-    if box["exc"]:
-        raise box["exc"]
-    return box["result"]
+# daemon 线程超时包装（_call_with_timeout）已提取到 ._net 共享（HK 等适配器复用）
 
 
 class AkshareQuoteAdapter:
-    """akshare + sina 实现。本地缓存按 (symbol, start, end, adjust) hash。"""
+    """akshare + sina 实现。本地缓存按 (symbol, adjust) hash（全量 + 区间过滤）。"""
 
     def __init__(self, cache_dir: str | Path = "cache/quotes") -> None:
         self.cache_dir = Path(cache_dir)
@@ -127,7 +110,7 @@ class AkshareQuoteAdapter:
     # ---- 网络拉取（带重试） ----
 
     @retry(
-        retry=retry_if_exception_type(ConnectionError),
+        retry=retry_if_exception(network_retry_predicate),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
@@ -135,7 +118,7 @@ class AkshareQuoteAdapter:
     def _fetch_daily(self, sina_sym: str, start: date, end: date, adjust: str) -> pd.DataFrame:
         import akshare as ak
 
-        df = _call_with_timeout(ak.stock_zh_a_daily, {
+        df = call_with_timeout(ak.stock_zh_a_daily, {
             "symbol": sina_sym,
             "start_date": start.strftime("%Y%m%d"),
             "end_date": end.strftime("%Y%m%d"),
@@ -144,7 +127,7 @@ class AkshareQuoteAdapter:
         return self._normalize_daily(df)
 
     @retry(
-        retry=retry_if_exception_type(ConnectionError),
+        retry=retry_if_exception(network_retry_predicate),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
@@ -152,7 +135,7 @@ class AkshareQuoteAdapter:
     def _fetch_index(self, symbol: str) -> pd.DataFrame:
         import akshare as ak
 
-        df = _call_with_timeout(ak.stock_zh_index_daily, {"symbol": symbol})
+        df = call_with_timeout(ak.stock_zh_index_daily, {"symbol": symbol})
         if "date" not in df.columns:
             raise KeyError("date")
         df["date"] = pd.to_datetime(df["date"]).dt.date
@@ -186,19 +169,24 @@ class AkshareQuoteAdapter:
     def daily_adjusted(
         self, code: str, start: date, end: date, adjust: str = "hfq"
     ) -> pd.DataFrame:
+        # 个股全量拉取一次缓存，缺近端数据时自动刷新，读取按 [start,end] 过滤
+        # （sina stock_zh_a_daily 无论区间都全量拉取，键含起止日期只会重复全量抓取；
+        # 与 index_daily 同口径）
         sina_sym = to_sina_symbol(code)
-        key = _cache_key(sina_sym, adjust, start.isoformat(), end.isoformat())
+        key = _cache_key(sina_sym, adjust)
         cached = self._read_cache(key)
         if cached is not None and not self._needs_refresh(cached, end):
-            return cached
-        try:
-            df = self._fetch_daily(sina_sym, start, end, adjust)
-        except Exception:
-            if cached is not None:
-                return cached  # 刷新失败退回旧缓存（好于无数据）
-            raise
-        self._write_cache(key, df)
-        return df
+            df = cached
+        else:
+            try:
+                df = self._fetch_daily(sina_sym, start, end, adjust)
+                self._write_cache(key, df)
+            except Exception:
+                if cached is None:
+                    raise
+                df = cached  # 刷新失败退回旧缓存（好于无数据）
+        mask = (df["date"] >= start) & (df["date"] <= end)
+        return df.loc[mask].reset_index(drop=True)
 
     def index_daily(self, symbol: str, start: date, end: date) -> pd.DataFrame:
         # 指数全量拉取一次缓存，缺近端数据时自动刷新（指数缓存键不含起止日期）
@@ -233,7 +221,7 @@ class AkshareQuoteAdapter:
         return result
 
     @retry(
-        retry=retry_if_exception_type(ConnectionError),
+        retry=retry_if_exception(network_retry_predicate),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
@@ -241,7 +229,7 @@ class AkshareQuoteAdapter:
     def _fetch_trade_dates(self) -> pd.DataFrame:
         import akshare as ak
 
-        df = _call_with_timeout(ak.tool_trade_date_hist_sina, {})
+        df = call_with_timeout(ak.tool_trade_date_hist_sina, {})
         df = df.copy()
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
         return df

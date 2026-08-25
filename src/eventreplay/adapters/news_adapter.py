@@ -12,6 +12,8 @@ import hashlib
 from datetime import date, datetime
 from typing import Protocol
 
+import pandas as pd
+
 from ..schema.news import NewsItem
 
 
@@ -157,12 +159,19 @@ class CCTVNewsAdapter:
         out: list[NewsItem] = []
         for _, r in df.iterrows():
             title = str(r.get("title", ""))
+            # date 列是 "YYYYMMDD" 原始字符串——直接传 str 给 pydantic 会按 unix 秒
+            # 解析成 1970，必须 strptime（同 AkshareNewsAdapter.fetch_by_date）
+            pub: datetime | None = None
+            try:
+                pub = datetime.strptime(str(r.get("date") or d.strftime("%Y%m%d")), "%Y%m%d")
+            except ValueError:
+                pub = None
             out.append(NewsItem(
                 id=_row_id("cctv", str(r.get("date", "")), title),
                 title=title,
                 content=str(r.get("content", "")),
                 source="央视新闻联播",
-                published_at=str(r.get("date", d.isoformat())),
+                published_at=pub,
             ))
         return out
 
@@ -171,6 +180,7 @@ class CLSNewsAdapter:
     """财联社全球（akshare stock_info_global_cls）。
 
     A 股实时快讯。akshare 封装，带异常降级。
+    真实列（akshare stock_info.py）：标题/内容/发布日期/发布时间。
     """
 
     def fetch_latest(self) -> list[NewsItem]:
@@ -181,20 +191,34 @@ class CLSNewsAdapter:
         except Exception:
             return []
         out: list[NewsItem] = []
-        cols = df.columns.tolist()
         for _, r in df.iterrows():
-            title = str(r.get("标题", r.get("title", r.iloc[1] if len(cols) > 1 else "")))
-            content = str(r.get("内容", r.get("content", r.iloc[2] if len(cols) > 2 else title)))
+            title = str(r.get("标题") or r.get("title") or "").strip()
+            content = str(r.get("内容") or r.get("content") or "").strip()
+            if not title or not content:
+                continue  # 列名缺失/内容缺失：跳过（不按位置兜底取错列、不复读 title 捏造内容）
             out.append(NewsItem(
-                id=_row_id("cls", title[:20]),
+                # title+content 全文 hash：模板化快讯 title 前缀相同也不互相覆盖
+                id=hashlib.sha1(f"{title}|{content}".encode("utf-8")).hexdigest()[:16],
                 title=title,
                 content=content,
+                published_at=self._parse_pub(r),
                 source="财联社",
             ))
         return out
 
     def fetch_by_date(self, d: date) -> list[NewsItem]:
-        return self.fetch_latest()
+        return []  # 财联社快讯仅实时接口，无按日查询能力（返回今日快讯语义错误）
+
+    @staticmethod
+    def _parse_pub(r) -> datetime | None:
+        """发布日期 + 发布时间 两列拼 published_at（缺任一列返回 None）。"""
+        d, t = r.get("发布日期"), r.get("发布时间")
+        if d is None or t is None:
+            return None
+        try:
+            return datetime.combine(pd.Timestamp(d).date(), pd.Timestamp(str(t)).time())
+        except Exception:
+            return None
 
 
 class Jin10NewsAdapter:
@@ -226,20 +250,37 @@ class Jin10NewsAdapter:
             return []
         out: list[NewsItem] = []
         for item in data:
-            content = item.get("data", {}).get("content", "")
-            if not content:
+            try:  # 单条坏数据跳过，不炸整源
+                raw = item.get("data") or {}
+                content = str(raw.get("content") or "") if isinstance(raw, dict) else ""
+                if not content:
+                    continue
+                out.append(NewsItem(
+                    id=_row_id("jin10", str(item.get("id", ""))),
+                    title=content[:60],
+                    content=content,
+                    source="金十数据",
+                    published_at=self._parse_time(item.get("time")),
+                ))
+            except Exception:
                 continue
-            out.append(NewsItem(
-                id=_row_id("jin10", str(item.get("id", ""))),
-                title=content[:60],
-                content=content,
-                source="金十数据",
-                published_at=str(item.get("time", "")),
-            ))
         return out
 
     def fetch_by_date(self, d: date) -> list[NewsItem]:
-        return self.fetch_latest()
+        return []  # 金十 flash list 仅实时，无按日查询能力（返回今日快讯语义错误）
+
+    @staticmethod
+    def _parse_time(v) -> datetime | None:
+        """time 字段：可转 int 的 unix 秒字符串 → naive datetime（与其他源一致）；缺失/非法 None。"""
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            return None
+        try:
+            return datetime.fromtimestamp(int(s))
+        except (ValueError, OSError, OverflowError):
+            return None
 
 
 class MultiSourceNewsAdapter:

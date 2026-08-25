@@ -148,28 +148,55 @@ def test_victim_neutral_small_loss(monkeypatch):
     assert out[0].calibration == "neutral"
 
 
-# ---- 边界 ----
+# ---- 边界（状态细分：pending / no_range / parse_error，仅真实走平才 neutral） ----
 
 
-def test_neutral_when_no_expected_range(monkeypatch):
-    """纯定性预判（无 expected range）→ neutral。"""
+def test_no_range_when_expected_range_missing(monkeypatch):
+    """纯定性预判（无 expected range）→ no_range（不是 neutral）。"""
     node = _make_node(monkeypatch, car_0_1=0.05, car_0_5=0.15)
     out = node.run({"event": _event(), "predictions": [_pred("688981", StockDirection.BENEFICIARY, None)]})
-    assert out[0].calibration == "neutral"
+    assert out[0].calibration == "no_range"
 
 
-def test_neutral_when_measure_returns_none(monkeypatch):
-    """measure_stock 返回 None → neutral，actual 字段保持 None。"""
+def test_parse_error_when_range_unparseable(monkeypatch):
+    """有区间字符串但解析失败 → parse_error。"""
+    node = _make_node(monkeypatch, car_0_1=0.05, car_0_5=0.15)
+    out = node.run({"event": _event(), "predictions": [_pred("688981", StockDirection.BENEFICIARY, "大概涨")]})
+    assert out[0].calibration == "parse_error"
+
+
+def test_pending_when_measure_returns_none(monkeypatch):
+    """measure_stock 返回 None（数据窗不足）→ pending，actual 字段保持 None。"""
     node = _make_node(monkeypatch, m_none=True)
     out = node.run({"event": _event(), "predictions": [_pred("688981", StockDirection.BENEFICIARY, "10%~30%")]})
-    assert out[0].calibration == "neutral"
+    assert out[0].calibration == "pending"
     assert out[0].actual_car_0_5 is None
 
 
-def test_neutral_when_unresolvable(monkeypatch):
-    """标的反查失败 → neutral。"""
+def test_pending_at_t0_when_no_car_0_5(monkeypatch):
+    """t0 当天（car_0_5 尚无数据窗）→ pending 非 neutral。"""
+    def _fake_measure(**kw):
+        return ImpactMeasurement(
+            stock_id=kw["stock_id"], episode_id=kw["episode_id"],
+            car_0_1=0.01, car_0_5=None,  # 数据窗不足
+        )
+    node = InitialCalibrationNode(FakeQuoteAdapter(), FakeStockMaster(), storage=None)
+    monkeypatch.setattr("eventreplay.pipeline.nodes.calibration.measure_stock", _fake_measure)
+    out = node.run({"event": _event(), "predictions": [_pred("688981", StockDirection.BENEFICIARY, "10%~30%")]})
+    assert out[0].calibration == "pending"
+
+
+def test_pending_when_unresolvable(monkeypatch):
+    """标的反查失败（无法度量）→ pending。"""
     node = _make_node(monkeypatch, car_0_1=0.1, car_0_5=0.2)
     out = node.run({"event": _event(), "predictions": [_pred("999999", StockDirection.BENEFICIARY, "10%~30%")]})
+    assert out[0].calibration == "pending"
+
+
+def test_neutral_only_for_real_flat_move(monkeypatch):
+    """真实走平（方向一致但未达 50% 达标线）→ 才是 neutral。"""
+    node = _make_node(monkeypatch, car_0_1=0.005, car_0_5=0.02)
+    out = node.run({"event": _event(), "predictions": [_pred("688981", StockDirection.BENEFICIARY, "10%~30%")]})
     assert out[0].calibration == "neutral"
 
 

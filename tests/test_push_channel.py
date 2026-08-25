@@ -46,6 +46,47 @@ def test_webhook_failure_returns_false(monkeypatch):
     assert not ch.push(title="t", markdown="md", event=_cand())
 
 
+def test_webhook_200_with_errcode_returns_false(monkeypatch, capsys):
+    """企微/钉钉出错时返回 HTTP 200 + body errcode≠0 → 必须判失败并打印 errmsg。"""
+    import requests as _req
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"errcode": 40001, "errmsg": "invalid credential"}
+
+    monkeypatch.setattr(_req, "post", lambda *a, **k: _Resp())
+    ch = WebhookChannel("https://qyapi.weixin.qq.com/cgi-bin/webhook/send")
+    assert not ch.push(title="t", markdown="md", event=_cand())
+    out = capsys.readouterr().out
+    assert "40001" in out and "invalid credential" in out
+
+
+def test_webhook_200_with_errcode_zero_ok(monkeypatch):
+    """企微/钉钉 200 + errcode=0 → 成功。"""
+    import requests as _req
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"errcode": 0, "errmsg": "ok"}
+
+    monkeypatch.setattr(_req, "post", lambda *a, **k: _Resp())
+    ch = WebhookChannel("https://example.com/webhook")
+    assert ch.push(title="t", markdown="md", event=_cand())
+
+
+def test_channel_archive_flags():
+    """FileChannel 是归档渠道（is_archive=True）；实时渠道为 False。"""
+    from eventreplay.pipeline.push_channel import FeishuChannel
+
+    assert FileChannel.is_archive is True
+    assert WebhookChannel.is_archive is False
+    assert FeishuChannel.is_archive is False
+
+
 def test_feishu_channel_push():
     """飞书 webhook 推送（interactive 卡片格式）。"""
     from eventreplay.pipeline.push_channel import FeishuChannel

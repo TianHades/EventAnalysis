@@ -17,6 +17,16 @@ def test_to_hk_symbol():
         to_hk_symbol("abc")
 
 
+def test_to_hk_symbol_too_long_raises():
+    """超过 5 位的数字串不是港股代码（A 股 6 位代码误传应报错而非 zfill 通过）。"""
+    with pytest.raises(ValueError):
+        to_hk_symbol("007000")  # 6 位
+    with pytest.raises(ValueError):
+        to_hk_symbol("600519")  # A 股代码误传
+    with pytest.raises(ValueError):
+        to_hk_symbol("hk123456")
+
+
 def _daily_df():
     return pd.DataFrame({
         "date": pd.to_datetime(["2023-01-03", "2023-06-15", "2023-12-29"]).date,
@@ -65,6 +75,42 @@ def test_daily_adjusted_uses_cache(monkeypatch, tmp_path):
     qa.daily_adjusted("00700", date(2023, 1, 1), date(2023, 12, 31))
     qa.daily_adjusted("00700", date(2023, 1, 1), date(2023, 6, 1))  # 第二次，不同日期范围
     assert calls["n"] == 1  # 命中缓存，未重新 fetch
+
+
+def test_akshare_calls_wrapped_with_timeout(monkeypatch, tmp_path):
+    """ak.* 裸调走超时包装（sina 网络挂起不卡死 replay）。"""
+    import akshare as ak
+    from eventreplay.adapters import hk_quote_adapter as mod
+
+    wrapped = {"n": 0}
+
+    def fake_cwt(func, kwargs, timeout=60):
+        wrapped["n"] += 1
+        return _daily_df()
+
+    monkeypatch.setattr(ak, "stock_hk_daily", lambda **kw: _daily_df())
+    monkeypatch.setattr(mod, "call_with_timeout", fake_cwt)
+    qa = HKQuoteAdapter(cache_dir=tmp_path)
+    qa.daily_adjusted("00700", date(2023, 1, 1), date(2023, 12, 31))
+    assert wrapped["n"] == 1  # _fetch_daily 经 call_with_timeout 调用
+
+
+def test_fetch_daily_retries_on_requests_connection_error(monkeypatch, tmp_path):
+    """requests.exceptions.ConnectionError 触发重试（旧 retry_if_exception_type 匹配不到）。"""
+    import akshare as ak
+    import requests.exceptions as req_exc
+
+    calls = {"n": 0}
+
+    def _fail(**kw):
+        calls["n"] += 1
+        raise req_exc.ConnectionError("connection reset")
+
+    monkeypatch.setattr(ak, "stock_hk_daily", _fail)
+    qa = HKQuoteAdapter(cache_dir=tmp_path)
+    with pytest.raises(req_exc.ConnectionError):
+        qa._fetch_daily("00700", "hfq")
+    assert calls["n"] == 3
 
 
 @pytest.mark.skip(reason="真实网络 smoke，手动跑")

@@ -36,12 +36,19 @@ class PatternService:
         impact_direction: ImpactDirection | str | None = None,
         industry: str | None = None,
         top_k: int = 3,
-    ) -> list[tuple[Pattern, float]]:
+    ) -> tuple[list[tuple[Pattern, float]], bool]:
+        """检索相似 Pattern，返回 (results, degraded)。
+
+        degraded=True 表示 embed 失败（query_vec=None）：结果是纯结构化过滤、
+        相似度全部为 0，调用方（forward 报告/CLI）必须明示"检索不可用"，
+        不得当作"库空/无匹配"。
+        """
         q = self.embedder.embed(desc)
-        return self.storage.search_patterns(
+        results = self.storage.search_patterns(
             q,
             shock_dimension=shock_dimension,
             impact_direction=impact_direction,
             industry=industry,
             top_k=top_k,
         )
+        return results, q is None

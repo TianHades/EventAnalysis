@@ -53,6 +53,19 @@ def test_pattern_idempotent_overwrites(tmp_path):
         assert ps[0].industries == ["新"]
 
 
+def test_pattern_none_enums_saved_and_restored(tmp_path):
+    """schema 允许 shock_dimension/impact_direction 为 None（非法 LLM 枚举诚实置 None），落库不得炸。"""
+    with Storage(tmp_path / "t.db") as st:
+        st.save_pattern(_pattern("r-none", None, sd=None, idir=None))  # type: ignore[arg-type]
+        got = st.get_pattern("r-none")
+        assert got is not None
+        assert got.shock_dimension is None
+        assert got.impact_direction is None
+        # None 枚举不参与过滤检索，但不带过滤的纯结构化检索仍应可见
+        results = st.search_patterns(None, top_k=10)
+        assert any(p.source_replay_id == "r-none" for p, _ in results)
+
+
 def test_pattern_null_embedding_excluded_from_vector_search(tmp_path):
     with Storage(tmp_path / "t.db") as st:
         st.save_pattern(_pattern("r1", None))  # 无 embedding

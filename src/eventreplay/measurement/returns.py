@@ -7,8 +7,13 @@ import pandas as pd
 
 
 def simple_returns(close: pd.Series) -> pd.Series:
-    """简单收益率 R_t = (P_t - P_{t-1}) / P_{t-1}，按日期对齐。"""
-    return close.pct_change().dropna()
+    """简单收益率 R_t = (P_t - P_{t-1}) / P_{t-1}，按日期对齐。
+
+    fill_method=None：禁止 pad 隐式填充——close 内 NaN 日收益会被静默填 0%
+    （且 pandas 未来版本默认翻转后整条序列错位）。NaN 日收益直接剔除；
+    清洗阶段（clean_quotes）已保证无 NaN close 进入度量。
+    """
+    return close.pct_change(fill_method=None).dropna()
 
 
 def fit_market_model(

@@ -11,6 +11,7 @@ class PoolMember(BaseModel):
     """受益/受损池成员。"""
 
     stock_id: str
+    stock_name: str | None = None  # 从度量侧带出（下游 synthesis/report 免反查）
     chain_node_id: str | None = None
     direction: StockDirection
     tier: Tier = Tier.UNGRADED
@@ -23,7 +24,7 @@ class PoolMember(BaseModel):
 class PoolStat(BaseModel):
     """单池组合统计量（GRANK + Adjusted BMP，spec §4.3）。N<5 时 disclosed=False。"""
 
-    n: int
+    n: int = Field(description="进入统计的有效样本数（car_0_20 缺失/WEAK fallback 成员不计入）")
     caar: float | None = None
     grank_z: float | None = None
     grank_p: float | None = None
@@ -31,6 +32,7 @@ class PoolStat(BaseModel):
     adj_bmp_p: float | None = None
     disclosed: bool = Field(default=True, description="N<5 时仅记录不披露")
     disagreement: bool = Field(default=False, description="GRANK 与 Adjusted BMP 结论分歧")
+    fallback_n: int = Field(default=0, description="WEAK fallback 列示成员数（不进 caar/t 检验）")
 
 
 class AttributionResult(BaseModel):

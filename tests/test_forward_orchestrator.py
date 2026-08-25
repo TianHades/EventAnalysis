@@ -18,7 +18,7 @@ from eventreplay.pipeline.nodes.candidate import _CandOut, _CandsOut
 from eventreplay.pipeline.nodes.chain import _ChainNodeOut, _ChainOut
 from eventreplay.pipeline.nodes.forward_mapping import _BenefOut, _PredictedStockOut, _VictOut
 from eventreplay.pipeline.nodes.ingest import _IngestOut
-from eventreplay.schema import ImpactDirection, ShockDimension, StockDirection
+from eventreplay.schema import Event, ImpactDirection, ShockDimension, StockDirection
 from eventreplay.schema.pattern import ArchetypalStock, Pattern
 
 _DATES = pd.bdate_range("2026-06-01", periods=40).date
@@ -105,13 +105,15 @@ class FakeQuoteAdapter:
 
 
 class FakePatternService:
-    """受控 find_similar：返回构造时给定的 (Pattern, score) 列表。"""
+    """受控 find_similar：返回构造时给定的 (Pattern, score) 列表 + 降级标记。"""
 
-    def __init__(self, results):
+    def __init__(self, results, degraded: bool = False, storage=None):
         self._results = results
+        self._degraded = degraded
+        self.storage = storage
 
     def find_similar(self, desc, *, top_k=3, **kw):
-        return self._results[:top_k]
+        return self._results[:top_k], self._degraded
 
 
 def _pattern() -> Pattern:
@@ -135,6 +137,15 @@ def _orch_with(reasoner, tmp_path, results):
     return ForwardOrchestrator(
         reasoner, FakeQuoteAdapter(), FakeStockMaster(),
         pattern_service=FakePatternService(results), storage=None,
+        reports_dir=tmp_path / "reports",
+    )
+
+
+def _orch_degraded(tmp_path, results, degraded, storage=None):
+    return ForwardOrchestrator(
+        FakeReasoner(), FakeQuoteAdapter(), FakeStockMaster(),
+        pattern_service=FakePatternService(results, degraded=degraded, storage=storage),
+        storage=storage,
         reports_dir=tmp_path / "reports",
     )
 
@@ -207,7 +218,7 @@ def test_post_mode_calibrates_strong(tmp_path, monkeypatch):
     )
     assert "盘后校准" in md
     assert "实际[+1]" in md and "实际[+5]" in md  # 校准列表头
-    assert "confirming" in md  # 受益标的 +15% vs 预期 10%~30% → confirming
+    assert "吻合" in md  # 受益标的 +15% vs 预期 10%~30% → confirming（渲染为中文标签）
 
 
 # ---- 路由阈值边界 ----
@@ -274,3 +285,61 @@ def test_forward_report_shows_pattern_qualitative(tmp_path):
     assert "事件影响定性" in md  # ## 2 标题
     assert "程度" in md and "范围" in md and "持续" in md  # 表头
     assert "大" in md and "广" in md and "显著" in md  # 定性值
+
+
+# ---- Fix 5c + Fix 12: 检索三态与报告显示 ----
+
+
+def test_forward_degraded_banner_no_false_claim(tmp_path):
+    """检索不可用 → 报告明示"向量检索不可用"，且不得谎称"无历史 Pattern 类比"。"""
+    md, _ = _orch_degraded(tmp_path, [], degraded=True).forward(
+        description="芯片管制", date_str="2026-07-15", mode="pre", event_id="fwd-deg",
+    )
+    assert "向量检索不可用" in md
+    assert "纯定性推理" in md
+    assert "无历史 Pattern 类比" not in md, "检索不可用时不得谎称已比对过历史"
+
+
+def test_forward_lib_empty_distinguished_from_no_match(tmp_path):
+    """库空（storage 无 Pattern）→ 报告说"规律库为空"；有库但无匹配 → 说"无相似"。"""
+    from eventreplay.storage import Storage
+
+    st = Storage(tmp_path / "lib.db")
+    md, _ = _orch_degraded(tmp_path, [], degraded=False, storage=st).forward(
+        description="全新事件", date_str="2026-07-15", mode="pre", event_id="fwd-empty",
+    )
+    assert "规律库为空" in md
+
+    st.save_pattern(_pattern())  # 库里有 1 条但相似度不足（results 为空 → 无匹配）
+    md2, _ = _orch_degraded(tmp_path, [], degraded=False, storage=st).forward(
+        description="全新事件", date_str="2026-07-15", mode="pre", event_id="fwd-nomatch",
+    )
+    assert "无相似历史 Pattern" in md2
+
+
+def test_forward_mode_not_post_no_calibration_label(tmp_path):
+    """mode≠post（如盘中 intraday）时报告头不得出现"盘后校准"字样。"""
+    md, _ = _orch(tmp_path, [(_pattern(), 0.82)]).forward(
+        description="芯片管制", date_str="2026-07-15", mode="intraday", event_id="fwd-intra",
+    )
+    assert "盘后校准" not in md
+    assert "intraday" in md  # 未知 mode 原样展示（不冒充盘前/盘后）
+
+
+def test_forward_report_renders_none_fields_safely(tmp_path):
+    """qualitative 各字段为 None 时渲染为 '—'，不崩溃（下游 schema 正 Optional 化）。"""
+    from eventreplay.schema import ForwardPrediction, ForwardResult
+
+    orch = _orch(tmp_path, [])
+    ev = _pattern().model_copy()  # 任意 Event
+    event = Event(
+        id="e", description="测试事件", announcement_date=date(2026, 7, 15),
+        reaction_date=date(2026, 7, 15), event_type="政策",
+    )
+    preds = [ForwardPrediction(stock_id="600000", stock_name=None, direction=StockDirection.BENEFICIARY, rationale="r")]
+    result = ForwardResult(event_id="x", event=event, beneficiary_predictions=preds)
+    # 模拟 Optional 化后的 None 字段（model_copy 不做校验）
+    result = result.model_copy(update={"transmission_logic": None, "confidence": None, "key_risks": None})
+    md = orch._generate_report(result)
+    assert "—" in md  # None 渲染为占位符而非崩溃
+    assert "None" not in md.replace("stock_name=None", "")  # 不出现裸 None 字样

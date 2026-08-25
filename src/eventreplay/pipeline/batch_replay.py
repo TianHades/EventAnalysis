@@ -16,15 +16,19 @@ from ..schema import CandidateEvent, Event, ImpactDirection, ShockDimension
 from .event_dedup import EventDedup
 
 
-def read_candidates(path: str | Path) -> list[CandidateEvent]:
-    """读 mining_candidates json → CandidateEvent[]（用户审核编辑后的文件）。
+def read_candidates(path: str | Path, echo: Callable[[str], None] = print) -> tuple[list[CandidateEvent], int]:
+    """读 mining_candidates json → (CandidateEvent[], 无效候选数)（用户审核编辑后的文件）。
 
     兼容新格式 {final: [...], ...} 与旧格式 [...候选...]。
+    缺/非法 announcement_date 的候选直接跳过并打印原因（绝不回退 date.today()——
+    历史事件漏写日期若被当成今天，会产出空壳 Pattern）。返回的 invalid 数供
+    调用方并入 failed 统计。
     """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if isinstance(data, dict) and "final" in data:
         data = data["final"]  # 新格式取 final
     out: list[CandidateEvent] = []
+    invalid = 0
     for d in data:
         dk = d.get("dedup_key") or ""
         if not dk:
@@ -37,11 +41,16 @@ def read_candidates(path: str | Path) -> list[CandidateEvent]:
             idir = ImpactDirection(d["impact_direction"]) if d.get("impact_direction") else None
         except (ValueError, KeyError):
             idir = None
-        ann_str = d.get("announcement_date") or date.today().isoformat()
+        ann_str = str(d.get("announcement_date") or "").strip()[:10]
         try:
-            ann = date.fromisoformat(str(ann_str)[:10])
+            ann = date.fromisoformat(ann_str)
         except ValueError:
-            ann = date.today()
+            invalid += 1
+            echo(
+                f"[skip] 候选 {dk[:12]} 缺/非法 announcement_date {d.get('announcement_date')!r}"
+                f"（需 YYYY-MM-DD），跳过不回退今天：{str(d.get('description', ''))[:40]}"
+            )
+            continue
         event = Event(
             id=f"evt-{dk[:12]}",
             description=d.get("description", ""),
@@ -63,7 +72,7 @@ def read_candidates(path: str | Path) -> list[CandidateEvent]:
             dedup_key=dk,
             industries=d.get("industries", []),
         ))
-    return out
+    return out, invalid
 
 
 class BatchReplayRunner:

@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS measurements (
     replay_id TEXT NOT NULL,
     stock_id TEXT NOT NULL,
     episode_id TEXT NOT NULL,
-    payload TEXT NOT NULL
+    payload TEXT NOT NULL,
+    UNIQUE(replay_id, stock_id, episode_id)
 );
 CREATE TABLE IF NOT EXISTS chains (
     event_id TEXT PRIMARY KEY,
@@ -117,6 +118,8 @@ class Storage:
                 self._conn.executescript(_SCHEMA)
         except Exception:
             pass
+        # migration: measurements 幂等唯一索引（存量库去重后建索引，防断点重跑度量翻倍）
+        self._migrate_measurements_unique()
         self._conn.commit()
 
     def close(self) -> None:
@@ -127,6 +130,41 @@ class Storage:
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
+
+    # ---- migrations ----
+
+    def _migrate_measurements_unique(self) -> None:
+        """为 measurements 补 (replay_id, stock_id, episode_id) 唯一索引。
+
+        存量库先去重（同组保留 MIN(id)，即最早一次写入）再建索引；
+        IntegrityError（并发写入引入新重复）时再清一次重试。幂等：已有合
+        法唯一索引则直接跳过。
+        """
+        for idx in self._conn.execute("PRAGMA index_list(measurements)").fetchall():
+            if not idx["unique"]:
+                continue
+            cols = {r["name"] for r in self._conn.execute(f"PRAGMA index_info('{idx['name']}')")}
+            if {"replay_id", "stock_id", "episode_id"} <= cols:
+                return  # 已有唯一索引（新库表约束或本迁移产物）
+
+        dedup_sql = (
+            "DELETE FROM measurements WHERE id NOT IN "
+            "(SELECT MIN(id) FROM measurements GROUP BY replay_id, stock_id, episode_id)"
+        )
+        create_sql = (
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_measurements_uniq "
+            "ON measurements(replay_id, stock_id, episode_id)"
+        )
+        self._conn.execute(dedup_sql)
+        self._conn.commit()
+        try:
+            self._conn.execute(create_sql)
+            self._conn.commit()
+        except sqlite3.IntegrityError:
+            self._conn.execute(dedup_sql)
+            self._conn.commit()
+            self._conn.execute(create_sql)
+            self._conn.commit()
 
     # ---- 实体 CRUD ----
 
@@ -162,8 +200,9 @@ class Storage:
         return Replay.model_validate_json(row["payload"]) if row else None
 
     def save_measurement(self, m: ImpactMeasurement, replay_id: str) -> None:
+        """幂等：(replay_id, stock_id, episode_id) 唯一，重跑覆盖（防度量翻倍）。"""
         self._conn.execute(
-            "INSERT INTO measurements(replay_id, stock_id, episode_id, payload) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO measurements(replay_id, stock_id, episode_id, payload) VALUES (?, ?, ?, ?)",
             (replay_id, m.stock_id, m.episode_id, m.model_dump_json()),
         )
         self._conn.commit()
@@ -216,8 +255,8 @@ class Storage:
                 payload,
                 emb_blob,
                 pattern.embedding_model,
-                pattern.shock_dimension.value,
-                pattern.impact_direction.value,
+                pattern.shock_dimension.value if pattern.shock_dimension else None,
+                pattern.impact_direction.value if pattern.impact_direction else None,
                 ",".join(pattern.industries),
                 pattern.created_at.isoformat(),
             ),
@@ -246,19 +285,27 @@ class Storage:
         industry: str | None = None,
         top_k: int = 5,
     ) -> list[tuple[Pattern, float]]:
-        """向量 cosine + 结构化过滤（枚举 + 子串）。query_vec=None 时仅结构化（embedding 不要求）。"""
+        """向量 cosine + 结构化过滤（枚举 + 子串）。query_vec=None 时仅结构化（embedding 不要求）。
+
+        维度不一致 / embedding NULL 的命中计 0 分并打印统计警告（跳过向量打分是
+        降级行为，不应静默——用户需要知道 Pattern 库维度漂移了）。
+        """
         where: list[str] = []
+        struct_where: list[str] = []  # 结构化过滤（与 embedding 无关，NULL 统计复用）
         params: list[Any] = []
         if query_vec is not None:
-            where.append("embedding IS NOT NULL")
+            where.append("embedding IS NOT NULL")  # 向量检索要求库存有 embedding
         if shock_dimension is not None:
             where.append("shock_dimension=?")
+            struct_where.append("shock_dimension=?")
             params.append(shock_dimension.value if hasattr(shock_dimension, "value") else shock_dimension)
         if impact_direction is not None:
             where.append("impact_direction=?")
+            struct_where.append("impact_direction=?")
             params.append(impact_direction.value if hasattr(impact_direction, "value") else impact_direction)
         if industry:
             where.append("industries LIKE ?")
+            struct_where.append("industries LIKE ?")
             params.append(f"%{industry}%")
         sql = "SELECT source_replay_id, payload, embedding FROM patterns"
         if where:
@@ -266,7 +313,9 @@ class Storage:
         rows = self._conn.execute(sql, params).fetchall()
         out: list[tuple[Pattern, float]] = []
         q = np.asarray(query_vec, dtype=np.float32) if query_vec is not None else None
-        qn = float(np.linalg.norm(q)) if q is not None else 0.0
+        # 分母 or 1.0 防全零向量 0/0 → NaN 污染排序（与下方 en 口径一致）
+        qn = (float(np.linalg.norm(q)) or 1.0) if q is not None else 0.0
+        n_mismatch = 0
         for row in rows:
             p = Pattern.model_validate_json(row["payload"])
             if q is not None and row["embedding"]:
@@ -275,16 +324,34 @@ class Storage:
                     en = float(np.linalg.norm(emb)) or 1.0
                     score = float(np.dot(q, emb) / (qn * en))
                 else:
+                    n_mismatch += 1
                     score = 0.0  # 维度不一致（embedding 后端切换过）：跳过向量打分而非崩溃
             else:
                 score = 0.0
             out.append((p, score))
+        # 降级统计告警：维度不匹配（上式）+ 缺 embedding（单独 count，它们被 WHERE 排除）
+        n_null = 0
+        if q is not None:
+            null_sql = "SELECT COUNT(*) FROM patterns WHERE embedding IS NULL"
+            if struct_where:
+                null_sql += " AND " + " AND ".join(struct_where)
+            n_null = self._conn.execute(null_sql, params).fetchone()[0]
+        if n_mismatch or n_null:
+            print(f"[storage] {n_mismatch} 条 Pattern 维度不匹配、{n_null} 条缺 embedding，已跳过向量打分")
         out.sort(key=lambda x: x[1], reverse=True)
         return out[:top_k]
 
     def list_patterns(self) -> list[Pattern]:
-        rows = self._conn.execute("SELECT source_replay_id FROM patterns").fetchall()
-        return [self.get_pattern(r["source_replay_id"]) for r in rows]  # type: ignore[misc]
+        """全量 Pattern（单查询取 payload+embedding，不做 N+1 逐条 get）。"""
+        rows = self._conn.execute("SELECT payload, embedding, embedding_model FROM patterns").fetchall()
+        out: list[Pattern] = []
+        for row in rows:
+            p = Pattern.model_validate_json(row["payload"])
+            if row["embedding"]:
+                emb = np.frombuffer(row["embedding"], dtype=np.float32).tolist()
+                p = p.model_copy(update={"embedding": emb, "embedding_model": row["embedding_model"]})
+            out.append(p)
+        return out
 
     # ---- 节点缓存 / 断点续跑 ----
 
@@ -306,9 +373,18 @@ class Storage:
         started_at: datetime | None = None,
         finished_at: datetime | None = None,
     ) -> None:
+        """覆盖语义：先删同 cache_key（跨 replay）与同 (replay_id, node_id) 的旧行再插。
+
+        保证：a) 同节点换 cache_key 后旧行清除（断点续跑不误命中）；
+        b) 坏缓存重算后新 payload 覆盖旧行（自愈，不因 replay_id 不同而残留）。
+        """
         payload_json = json.dumps(payload, ensure_ascii=False) if payload is not None else None
         self._conn.execute(
-            "INSERT OR REPLACE INTO pipeline_runs"
+            "DELETE FROM pipeline_runs WHERE cache_key=? OR (replay_id=? AND node_id=?)",
+            (cache_key, replay_id, node_id),
+        )
+        self._conn.execute(
+            "INSERT INTO pipeline_runs"
             "(replay_id, node_id, cache_key, status, payload, started_at, finished_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
@@ -368,3 +444,12 @@ class Storage:
             (dedup_key, source, payload, datetime.utcnow().isoformat(), purpose),
         )
         self._conn.commit()
+
+    def list_recent_seen(self, purpose: str, limit: int = 10) -> list[dict[str, Any]]:
+        """按 purpose 取最近 seen 事件（seen_at 倒序），供监控上下文构建。"""
+        rows = self._conn.execute(
+            "SELECT dedup_key, source, payload, seen_at, purpose FROM seen_events "
+            "WHERE purpose=? ORDER BY seen_at DESC LIMIT ?",
+            (purpose, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]

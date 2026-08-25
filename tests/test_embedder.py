@@ -6,6 +6,13 @@
 import pytest
 
 from eventreplay.llm import Embedder
+from eventreplay.llm import embedder as _embedder_mod
+
+
+@pytest.fixture(autouse=True)
+def _tmp_backend_cache(tmp_path, monkeypatch):
+    """所有测试的 auto 锁定持久化指向 tmp（避免读写仓库 cache/embedder_backend.txt）。"""
+    monkeypatch.setattr(_embedder_mod, "_DEFAULT_BACKEND_CACHE", tmp_path / "embedder_backend.txt")
 
 
 def _set_backend(monkeypatch, backend):
@@ -130,3 +137,86 @@ def test_embedder_auto_lock_does_not_switch(monkeypatch):
     e.embed("y")
     assert e._auto_resolved == "local"
     assert e.embedding_dim == 512
+
+
+# ---- Fix 5a: 网络异常重试 + auto 锁定跨进程持久化 ----
+
+
+def test_embedder_retries_transient_failure(monkeypatch):
+    """瞬时网络异常重试 2 次：前两次 raise、第三次成功 → 返回向量。"""
+    _set_backend(monkeypatch, "local")
+    e = Embedder()
+    calls = {"n": 0}
+
+    def flaky(text):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("网络抖动")
+        return [0.1] * e.embedding_dim
+
+    monkeypatch.setattr(e, "_call", flaky)
+    assert e.embed("x") is not None
+    assert calls["n"] == 3, "应重试 2 次（共 3 次尝试）"
+
+
+def test_embedder_retry_exhausted_returns_none(monkeypatch):
+    """持续失败：3 次尝试耗尽 → None（不无限重试）。"""
+    _set_backend(monkeypatch, "local")
+    e = Embedder()
+    calls = {"n": 0}
+
+    def always_boom(text):
+        calls["n"] += 1
+        raise RuntimeError("断网")
+
+    monkeypatch.setattr(e, "_call", always_boom)
+    assert e.embed("x") is None
+    assert calls["n"] == 3
+
+
+def test_embedder_auto_lock_persisted_across_instances(monkeypatch, tmp_path):
+    """auto 锁定结果持久化到文件：新实例（模拟新进程）直接复用，不重新探测。
+
+    防进程 A 锁 zhipu(2048) 建库、进程 B 重新探测锁 local(512) → 维度漂移。
+    """
+    _set_backend(monkeypatch, "auto")
+    monkeypatch.setenv("ZHIPU_API_KEY", "fake-zhipu")
+    cache_file = tmp_path / "embedder_backend.txt"
+
+    e1 = Embedder(backend_cache=cache_file)
+    monkeypatch.setattr(e1, "_call_zhipu", lambda t: [0.1] * 2048)
+    assert e1.embed("x") is not None
+    assert cache_file.read_text(encoding="utf-8").strip() == "zhipu"
+
+    # 新实例：直接用持久化的锁定值（不重新探测智谱可达性）
+    e2 = Embedder(backend_cache=cache_file)
+    assert e2._auto_resolved == "zhipu"
+    local_calls = {"n": 0}
+
+    def _local(text):
+        local_calls["n"] += 1
+        return [0.1] * 512
+
+    monkeypatch.setattr(e2, "_call_zhipu", lambda t: [0.2] * 2048)
+    monkeypatch.setattr(e2, "_call_local", _local)
+    got = e2.embed("y")
+    assert got == [0.2] * 2048, "应走锁定的 zhipu 后端"
+    assert local_calls["n"] == 0, "不得重新探测回退 local"
+
+
+def test_embedder_auto_local_lock_also_persisted(monkeypatch, tmp_path):
+    """锁 local 同样持久化（写文件）；文件损坏/非法值时忽略并重新探测。"""
+    _set_backend(monkeypatch, "auto")
+    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cache_file = tmp_path / "embedder_backend.txt"
+
+    e1 = Embedder(backend_cache=cache_file)
+    monkeypatch.setattr(e1, "_call_local", lambda t: [0.1] * 512)
+    e1.embed("x")
+    assert cache_file.read_text(encoding="utf-8").strip() == "local"
+
+    cache_file.write_text("garbage", encoding="utf-8")  # 非法锁定值
+    e2 = Embedder(backend_cache=cache_file)
+    assert e2._auto_resolved is None, "非法持久化值应忽略"

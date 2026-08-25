@@ -49,12 +49,33 @@ def clean_quotes(
         if listing_date >= reaction_date or (reaction_date - listing_date).days < 365:
             return None
 
+    # close 为 NaN 的行整行剔除（清洗阶段保证无 NaN close 进度量；
+    # 否则 pct_change 会产出 NaN/被 pad 伪造成 0% 收益，破坏 stock/bench 对齐）
+    if "close" in df.columns:
+        df = df.loc[df["close"].notna()].reset_index(drop=True)
+        if df.empty:
+            return None
+
     # 事件窗停牌占比（必须在去停牌前算，spec §13 偏离5：高占比→低置信，防 CAR 失真）
     susp_in_event = 0.0
     if "volume" in df.columns and "date" in df.columns:
         evt_raw = df.loc[df["date"] >= reaction_date].head(61)
         if len(evt_raw) > 0:
             susp_in_event = float((evt_raw["volume"] == 0).mean())
+
+    # 零成交占比（估计窗 [t0-120, t0-21]）：必须在去停牌**前**的原始样本上统计——
+    # volume==0 行删后再统计恒 ≈0，spec"零成交日>10%→thin trading 低置信"将永远不触发。
+    # 注意 t0 在原始 df 与去停牌后 df 上位置不同，需独立定位。
+    zero_vol_pct = 0.0
+    if "volume" in df.columns and "date" in df.columns and estimation_window_days > 0:
+        t0_mask_raw = df["date"] >= reaction_date
+        if t0_mask_raw.any():
+            t0_raw = t0_mask_raw.idxmax()  # t0 在原始 df 的位置
+            est_raw = df.iloc[
+                max(0, t0_raw - estimation_window_days) : max(0, t0_raw - 20)
+            ]
+            if len(est_raw) > 0:
+                zero_vol_pct = float((est_raw["volume"] == 0).mean())
 
     # 停牌日剔除（volume==0）
     if "volume" in df.columns:
@@ -65,7 +86,7 @@ def clean_quotes(
     if susp_in_event > 0.20:
         reasons.append(f"事件窗停牌占比{int(susp_in_event * 100)}%")
 
-    # thin trading（估计窗 [t0-120, t0-21]）
+    # thin trading（估计窗 [t0-120, t0-21]；零成交占比用去停牌前的统计结果）
     if "turnover" in df.columns and estimation_window_days > 0:
         t0_mask = df["date"] >= reaction_date
         if t0_mask.any():
@@ -75,7 +96,6 @@ def clean_quotes(
             est_sample = df.iloc[est_start:est_end] if est_end > est_start else df.iloc[:0]
             if not est_sample.empty:
                 avg_turnover = est_sample["turnover"].mean()
-                zero_vol_pct = (est_sample["turnover"] == 0).mean() if len(est_sample) else 0
                 if (avg_turnover is not None and avg_turnover < thin_turnover) or zero_vol_pct > thin_zero_vol_pct:
                     reasons.append("thin trading")
 

@@ -3,10 +3,18 @@
 MVP 实现：第一段按经济显著性+direction 划池（direction↔CAR 符号冲突标 direction_conflict）；
 第二段池级统计量为"横截面 CAR t 检验"的简化实现（spec §4.3 GRANK 需 SAR 矩阵贯通，
 留作后续；此处 t 检验作辅证披露）。
+
+口径：
+- 池统计只用固定窗口 CAR[0,+20]——car_0_20 缺失的成员不进统计（回退三窗最强值会
+  人为膨胀 t 检验显著性），n 反映有效样本。
+- fallback WEAK 成员仅列示，不进 caar/t 检验（pool_stats.fallback_n 注明数量）。
+- 划池显著性允许三窗最强（让 late-bloomer 入池），但 +60/+90 窗口的经济阈值按
+  sqrt(窗口/20) 放大（同等幅度在长窗口更容易达到，须提高门槛）。
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -35,14 +43,16 @@ def _tier(car_abs: float, threshold: float, low_conf: bool) -> Tier:
     return Tier.MEDIUM
 
 
-def _pool_stat(cars: list[float]) -> PoolStat:
-    n = len(cars)
+def _pool_stat(cars: list[float | None], *, fallback_n: int = 0) -> PoolStat:
+    """cars 中 None（car_0_20 缺失）的成员被过滤，n 反映有效样本。"""
+    vals = [c for c in cars if c is not None]
+    n = len(vals)
     if n == 0:
-        return PoolStat(n=0, disclosed=False)
-    arr = np.array(cars, dtype=float)
+        return PoolStat(n=0, disclosed=False, fallback_n=fallback_n)
+    arr = np.array(vals, dtype=float)
     caar = float(arr.mean())
     if n < 5:
-        return PoolStat(n=n, caar=caar, disclosed=False)
+        return PoolStat(n=n, caar=caar, disclosed=False, fallback_n=fallback_n)
     t, p = stats.ttest_1samp(arr, 0)
     return PoolStat(
         n=n,
@@ -50,18 +60,33 @@ def _pool_stat(cars: list[float]) -> PoolStat:
         grank_z=float(t),
         grank_p=float(p),
         disclosed=True,
+        fallback_n=fallback_n,
     )
 
 
+def _car_best_window(m: ImpactMeasurement) -> tuple[float, int]:
+    """最强窗口 CAR 及其窗口天数（+20/+60/+90 中 |CAR| 最大者）——让 late-bloomer（+20 弱、+90 强）不被 +20 阈值漏掉。"""
+    best: tuple[float, int] | None = None
+    for car, window in ((m.car_0_20, 20), (m.car_0_60, 60), (m.car_0_90, 90)):
+        if car is None:
+            continue
+        if best is None or abs(car) > abs(best[0]):
+            best = (car, window)
+    return best if best is not None else (0.0, 20)
+
+
 def _car_best(m: ImpactMeasurement) -> float:
-    """最强窗口 CAR（+20/+60/+90 中 |CAR| 最大者）——让 late-bloomer（+20 弱、+90 强）不被 +20 阈值漏掉。"""
-    cars = [c for c in (m.car_0_20, m.car_0_60, m.car_0_90) if c is not None]
-    return max(cars, key=abs) if cars else 0.0
+    return _car_best_window(m)[0]
 
 
-def _stat_car(m: ImpactMeasurement) -> float:
-    """池统计量统一取固定窗口 CAR[0,+20]（对三窗取最大会人为膨胀 t 检验显著性）。"""
-    return m.car_0_20 if m.car_0_20 is not None else _car_best(m)
+def _window_scaled_threshold(threshold: float, window: int) -> float:
+    """长窗口经济阈值按 sqrt(窗口/20) 放大（+60 → ×1.732，+90 → ×2.121）。"""
+    return threshold * math.sqrt(window / 20)
+
+
+def _stat_car(m: ImpactMeasurement) -> float | None:
+    """池统计量只用固定窗口 CAR[0,+20]；缺失即 None（不回退三窗最强值，防显著性膨胀）。"""
+    return m.car_0_20
 
 
 class AttributionNode(Node):
@@ -85,13 +110,13 @@ class AttributionNode(Node):
             StockDirection.BENEFICIARY: [],
             StockDirection.VICTIM: [],
         }
-        # 第一段：经济显著性（+20/+60/+90 任一窗口显著）+ direction 划池
+        # 第一段：经济显著性（+20/+60/+90 任一窗口显著，长窗口阈值放大）+ direction 划池
         for m in uniq:
-            car = _car_best(m)  # 最强窗口，让 late-bloomer 入池
+            car, window = _car_best_window(m)  # 最强窗口，让 late-bloomer 入池
             d = cand_dir.get(m.stock_id, m.direction)
             if d is None:
                 continue
-            threshold = economic_threshold(m.board)  # 按标的板块取阈值
+            threshold = _window_scaled_threshold(economic_threshold(m.board), window)
             conflict = (d == StockDirection.BENEFICIARY and car < 0) or (
                 d == StockDirection.VICTIM and car > 0
             )
@@ -99,6 +124,7 @@ class AttributionNode(Node):
                 pools[d].append(
                     PoolMember(
                         stock_id=m.stock_id,
+                        stock_name=m.stock_name,
                         chain_node_id=m.chain_node_id,
                         direction=d,
                         tier=_tier(abs(car), threshold, m.low_confidence),
@@ -131,6 +157,7 @@ class AttributionNode(Node):
                 members.append(
                     PoolMember(
                         stock_id=m.stock_id,
+                        stock_name=m.stock_name,
                         chain_node_id=m.chain_node_id,
                         direction=d,
                         tier=Tier.WEAK,
@@ -141,9 +168,19 @@ class AttributionNode(Node):
                     )
                 )
 
+        # 池统计：只用 car_0_20（缺失成员剔除）；WEAK fallback 成员仅列示不计入
+        def _stat_for(members: list[PoolMember]) -> PoolStat:
+            fallback_n = sum(1 for x in members if x.tier == Tier.WEAK)
+            cars = [
+                _member_car(x.stock_id, measurements)
+                for x in members
+                if x.tier != Tier.WEAK
+            ]
+            return _pool_stat(cars, fallback_n=fallback_n)
+
         pool_stats = {
-            "beneficiary": _pool_stat([_member_car(m.stock_id, measurements) for m in pools[StockDirection.BENEFICIARY]]),
-            "victim": _pool_stat([_member_car(m.stock_id, measurements) for m in pools[StockDirection.VICTIM]]),
+            "beneficiary": _stat_for(pools[StockDirection.BENEFICIARY]),
+            "victim": _stat_for(pools[StockDirection.VICTIM]),
         }
         return AttributionResult(
             beneficiary_pool=pools[StockDirection.BENEFICIARY],
@@ -154,8 +191,9 @@ class AttributionNode(Node):
         )
 
 
-def _member_car(stock_id: str, measurements: list[ImpactMeasurement]) -> float:
+def _member_car(stock_id: str, measurements: list[ImpactMeasurement]) -> float | None:
+    """成员的 CAR[0,+20]（无则 None，由 _pool_stat 过滤）。"""
     for m in measurements:
         if m.stock_id == stock_id:
             return _stat_car(m)
-    return 0.0
+    return None

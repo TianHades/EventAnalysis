@@ -40,8 +40,13 @@ class TransmissionChainNode(LLMNode):
                 {"label": n.label, "industry": n.sw_industry_l1, "shock": n.shock_direction}
                 for n in nodes
             ],
-            "beneficiary": [m.stock_id for m in ar.beneficiary_pool],
-            "victim": [m.stock_id for m in ar.victim_pool],
+            # code+name 成对传（裸 6 位代码易致 LLM 背错公司名张冠李戴）
+            "beneficiary": [
+                {"code": m.stock_id, "name": m.stock_name} for m in ar.beneficiary_pool
+            ],
+            "victim": [
+                {"code": m.stock_id, "name": m.stock_name} for m in ar.victim_pool
+            ],
         }
         return f"结构化数据：\n{json.dumps(data, ensure_ascii=False)}"
 

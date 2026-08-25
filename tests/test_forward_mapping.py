@@ -64,15 +64,18 @@ class FakeStockMaster:
         "中芯国际": ("688981", "中芯国际"),
         "000725": ("000725", "京东方A"),
         "京东方A": ("000725", "京东方A"),
+        "600519": ("600519", "贵州茅台"),
+        "贵州茅台": ("600519", "贵州茅台"),
     }
 
     def resolve(self, identifier: str):
         hit = self._mapping.get(identifier)
         if hit is None:
             return None
+        board = "主板" if hit[0].startswith(("600", "000")) else "科创板"
         return ResolvedStock(
-            code=hit[0], name=hit[1], market="沪", board="科创板",
-            listing_date=date(2020, 7, 16),
+            code=hit[0], name=hit[1], market="沪", board=board,
+            listing_date=date(2001, 8, 27) if board == "主板" else date(2020, 7, 16),
         )
 
 
@@ -122,7 +125,9 @@ def test_forward_mapping_split_and_merge():
 
     # 返回模型契约（output_type 声明保证 SQLite 缓存命中后重建为同类型）
     assert isinstance(out, ForwardMappingResult)
-    assert out.errors == []
+    # 反查失败（999999）现在记入 errors 供观测；子调用本身无失败
+    assert all("预判失败" not in e for e in out.errors)
+    assert any("999999" in e for e in out.errors)
     assert out.confidence == "高"
 
     # 受益池：第一条合法（第二条反查失败、第三条方向非法）→ 1 条
@@ -133,7 +138,7 @@ def test_forward_mapping_split_and_merge():
     assert b.stock_name == "中芯国际"
     assert b.direction == StockDirection.BENEFICIARY
     assert b.expected_car_0_20_range == "10%~30%"
-    assert b.source_pattern_ids == ["replay-chip-2018"]
+    assert b.source_pattern_ids == ["p1"]  # pattern 自身 id（非 source_replay_id）
 
     # 受损池
     vict = out.victim_predictions
@@ -219,3 +224,68 @@ def test_forward_mapping_all_fail_records_errors():
     assert out.beneficiary_predictions == []
     assert out.victim_predictions == []
     assert "推理失败" in out.confidence
+
+
+# ---- 修复：幻觉代码错配 / 侧别校验 / source_pattern_ids 用 pattern 自身 id ----
+
+
+class _MismatchReasoner:
+    """受益子调用返回 code/name 错配 + 侧别错位 + 正常条目。"""
+
+    model_alias = "fake"
+
+    def call(self, *, system, user, output_model):
+        if output_model is _BenefOut:
+            return _BenefOut(
+                transmission_logic="逻辑",
+                beneficiaries=[
+                    # code=600519(贵州茅台) + name=平安银行（未注册，名称解析失败）
+                    # → 代码与名称完全脱节 → 幻觉错配，必须丢弃
+                    _PredictedStockOut(code="600519", name="平安银行", direction="受益", rationale="张冠李戴"),
+                    # 正常条目：code/name 一致 → 保留
+                    _PredictedStockOut(code="688981", name="中芯国际", direction="受益", rationale="正常"),
+                    # 侧别错位：beneficiary 调用返回 direction=受损 → 不得进受益池
+                    _PredictedStockOut(code="000725", name="京东方A", direction="受损", rationale="侧别错位"),
+                ],
+                confidence="高",
+            )
+        if output_model is _VictOut:
+            return _VictOut(transmission_logic="受损", victims=[
+                # code 幻觉但名称清晰（中芯国际）→ 名称优先，以名称为准保留
+                _PredictedStockOut(code="600519", name="中芯国际", direction="受损", rationale="代码错但名称对"),
+            ])
+        raise AssertionError(f"未mock: {output_model}")
+
+
+def test_forward_mapping_code_name_mismatch_dropped():
+    """code/name 解析到不同标的且名称与解析名无包含关系 → 丢弃并记 errors。"""
+    node = ForwardMappingNode(_MismatchReasoner(), FakeStockMaster(), storage=None)
+    out = node.run({
+        "event": _event(), "patterns": [], "scores": [], "degradation_level": "strong",
+    })
+    ben_ids = [p.stock_id for p in out.beneficiary_predictions]
+    assert "600519" not in ben_ids  # 600519+平安银行 错配被丢弃
+    assert ben_ids == ["688981"]    # 正常条目保留；侧别错位(受损)不进受益池
+    assert any("错配" in e or "脱节" in e for e in out.errors)
+    assert any("侧别" in e or "方向" in e for e in out.errors)
+
+
+def test_forward_mapping_name_priority_over_wrong_code():
+    """名称解析成功且名称清晰 → 以名称为准（代码幻觉不致错配）。"""
+    node = ForwardMappingNode(_MismatchReasoner(), FakeStockMaster(), storage=None)
+    out = node.run({
+        "event": _event(), "patterns": [], "scores": [], "degradation_level": "strong",
+    })
+    vict = out.victim_predictions
+    assert len(vict) == 1
+    assert vict[0].stock_id == "688981"  # 名称"中芯国际"优先于幻觉代码 600519
+    assert vict[0].stock_name == "中芯国际"
+
+
+def test_source_pattern_ids_use_pattern_id():
+    """source_pattern_ids 装 pattern 自身 id（pat-xxx），而非 source_replay_id。"""
+    node = ForwardMappingNode(FakeReasoner(), FakeStockMaster(), storage=None)
+    out = node.run({
+        "event": _event(), "patterns": [_pattern()], "scores": [0.82], "degradation_level": "strong",
+    })
+    assert out.beneficiary_predictions[0].source_pattern_ids == ["p1"]  # _pattern().id，非 replay-chip-2018

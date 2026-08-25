@@ -66,7 +66,9 @@ TUSHARE_TOKEN=
 eventreplay replay --desc "事件描述" --date 2024-09-24 --market A股 --model haiku
 ```
 
-产出：`reports/{日期}_{事件描述}.md` + 结构化数据入 SQLite + Pattern 自动入库。
+产出：`reports/{日期}_{事件描述}.md` + 结构化数据入 SQLite。
+
+> Pattern 提炼是独立一步：单事件复盘后需手动 `eventreplay extract-pattern --replay-id <id>`；`batch-replay` 批量链路才会对每个事件自动提炼入库。
 
 ### 前瞻（新事件预判）
 

@@ -29,7 +29,14 @@ def _parse_range(range_str: str | None) -> tuple[float, float] | None:
 
 
 class InitialCalibrationNode(Node):
-    """盘后校准：对前瞻预判标的拉实际行情，算 [+1]/[+5] CAR，对比预期区间。"""
+    """盘后校准：对前瞻预判标的拉实际行情，算 [+5] CAR（[+1] 仅记录），对比预期区间。
+
+    判定只用 car_0_5（[+5] 初始校准窗）；状态语义：
+    - pending：数据窗不足（反查失败/行情失败/度量 None/car_0_5 None，如 t0 当天）
+    - no_range：纯定性预判（无预期区间）
+    - parse_error：区间字符串存在但解析失败
+    - confirming / diverging / neutral：真实走平（方向一致未达 50% 达标线）才 neutral
+    """
 
     node_id = "initial_calibration"
 
@@ -50,18 +57,18 @@ class InitialCalibrationNode(Node):
         try:
             bench = self.qa.index_daily(self.benchmark, start, end)
         except Exception:
-            bench = pd.DataFrame()  # 基准拉取失败 → 所有标的 neutral
+            bench = pd.DataFrame()  # 基准拉取失败 → 所有标的 pending（度量不可得）
 
         out: list[ForwardPrediction] = []
         for pred in predictions:
             resolved = self.sm.resolve(pred.stock_id)
             if resolved is None:
-                out.append(pred.model_copy(update={"calibration": "neutral"}))
+                out.append(pred.model_copy(update={"calibration": "pending"}))
                 continue
             try:
                 q = self.qa.daily_adjusted(pred.stock_id, start, end)
             except Exception:
-                out.append(pred.model_copy(update={"calibration": "neutral"}))
+                out.append(pred.model_copy(update={"calibration": "pending"}))
                 continue
             m = measure_stock(
                 stock_id=pred.stock_id,
@@ -74,28 +81,31 @@ class InitialCalibrationNode(Node):
                 listing_date=resolved.listing_date,
                 direction=pred.direction,
             )
-            if m is None or m.car_0_1 is None:
-                out.append(pred.model_copy(update={"calibration": "neutral"}))
+            if m is None or m.car_0_5 is None:
+                out.append(pred.model_copy(update={"calibration": "pending"}))
                 continue
 
             # 校准判定（用 [+5] 做初始校准）
-            rng = _parse_range(pred.expected_car_0_20_range)
             actual = m.car_0_5
-            if actual is None or rng is None:
-                cal = "neutral"
+            if pred.expected_car_0_20_range is None:
+                cal = "no_range"
             else:
-                # 保守边界：区间中幅度最小者；受益/受损同口径（各取该方向 50% 达标线）
-                near = min(abs(x) for x in rng)
-                if pred.direction == StockDirection.BENEFICIARY:
-                    if actual > 0:
-                        cal = "confirming" if actual >= near * 0.5 else "neutral"
-                    else:
-                        cal = "diverging"
-                else:  # VICTIM
-                    if actual < 0:
-                        cal = "confirming" if actual <= -near * 0.5 else "neutral"
-                    else:
-                        cal = "diverging"
+                rng = _parse_range(pred.expected_car_0_20_range)
+                if rng is None:
+                    cal = "parse_error"
+                else:
+                    # 保守边界：区间中幅度最小者；受益/受损同口径（各取该方向 50% 达标线）
+                    near = min(abs(x) for x in rng)
+                    if pred.direction == StockDirection.BENEFICIARY:
+                        if actual > 0:
+                            cal = "confirming" if actual >= near * 0.5 else "neutral"
+                        else:
+                            cal = "diverging"
+                    else:  # VICTIM
+                        if actual < 0:
+                            cal = "confirming" if actual <= -near * 0.5 else "neutral"
+                        else:
+                            cal = "diverging"
 
             out.append(
                 pred.model_copy(

@@ -50,8 +50,6 @@ class Event(BaseModel):
                     summary=self.description,
                 )
             ]
-        if len(self.episodes) == 0:
-            raise ValueError("Event.episodes 不可为空")
         return self
 
     @property

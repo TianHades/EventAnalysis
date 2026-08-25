@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 
 import typer
 from dotenv import load_dotenv
@@ -28,8 +29,64 @@ app = typer.Typer(add_completion=False, help="重大事件复盘分析系统")
 _DEFAULT_MODEL = os.getenv("EVENTREPLAY_MODEL", "sonnet")
 _DEFAULT_BENCHMARK = os.getenv("EVENTREPLAY_BENCHMARK", "sh000300")
 _DEFAULT_DB = os.getenv("EVENTREPLAY_DB", "data/eventreplay.db")
-_DEFAULT_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "240"))
 _DEFAULT_FEISHU = os.getenv("FEISHU_WEBHOOK", "") or None
+_DEFAULT_INTERVAL_FALLBACK = 240  # MONITOR_INTERVAL/--interval 坏值的回退值
+
+
+def _parse_interval_minutes(raw: str | None) -> tuple[int, str | None]:
+    """解析采集间隔（分钟）→ (minutes, 坏值告警|None)。
+
+    坏值（.env 写错/CLI 传错）不再让模块导入崩溃：回退 240 并返回告警文案。
+    """
+    if raw is None or str(raw).strip() == "":
+        return _DEFAULT_INTERVAL_FALLBACK, None
+    try:
+        return int(str(raw).strip()), None
+    except ValueError:
+        return _DEFAULT_INTERVAL_FALLBACK, (
+            f"MONITOR_INTERVAL/--interval 值非法: {raw!r}（需整数分钟），已回退 {_DEFAULT_INTERVAL_FALLBACK}"
+        )
+
+
+def _require_iso_date(value: str, opt: str) -> str:
+    """校验 YYYY-MM-DD（fromisoformat 严格解析），坏值抛 typer.BadParameter 带示例。"""
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise typer.BadParameter(
+            f"日期格式需为 YYYY-MM-DD（如 2024-01-15），收到 {value!r}", param_hint=opt
+        )
+    return value
+
+
+def _require_enum(value: str | None, enum_cls, opt: str):
+    """校验枚举参数（空直通 None），坏值抛 BadParameter 并列出全部合法取值。"""
+    if value is None:
+        return None
+    try:
+        return enum_cls(value)
+    except ValueError:
+        valid = "、".join(e.value for e in enum_cls)
+        raise typer.BadParameter(f"合法取值：{valid}", param_hint=opt)
+
+
+def make_adapters(market: str, benchmark: str | None = None):
+    """按市场装配适配器 → (quote_adapter, stock_master, benchmark)。
+
+    统一 replay/forward/batch-replay 三处"港股分支 + benchmark 切 HSI"的装配逻辑：
+    A股默认 sh000300；港股用 HK 适配器，benchmark 未显式指定（或仍是 A 股默认值）
+    时切 HSI。
+    """
+    if market == "港股":
+        from .adapters.hk_quote_adapter import HKQuoteAdapter
+        from .adapters.hk_stock_master import HKStockMaster
+
+        qa, sm = HKQuoteAdapter(), HKStockMaster()
+        bench = benchmark if benchmark and benchmark != _DEFAULT_BENCHMARK else "HSI"
+    else:
+        qa, sm = AkshareQuoteAdapter(), StockMaster()
+        bench = benchmark or _DEFAULT_BENCHMARK
+    return qa, sm, bench
 
 
 @app.command()
@@ -44,17 +101,12 @@ def replay(
     db: str = typer.Option(_DEFAULT_DB, "--db", help="SQLite 路径"),
 ) -> None:
     """Phase 1：对单个历史事件跑完整复盘流水线。"""
+    date = _require_iso_date(date, "--date")
+    if reaction_date is not None:
+        reaction_date = _require_iso_date(reaction_date, "--reaction-date")
     typer.echo(f"[replay] {desc[:40]}... date={date} market={market} model={model}")
     reasoner = ClaudeCodeProvider(model_alias=model)
-    if market == "港股":
-        from .adapters.hk_quote_adapter import HKQuoteAdapter
-        from .adapters.hk_stock_master import HKStockMaster
-        qa = HKQuoteAdapter()
-        sm = HKStockMaster()
-        benchmark = benchmark if benchmark != _DEFAULT_BENCHMARK else "HSI"
-    else:
-        qa = AkshareQuoteAdapter()
-        sm = StockMaster()
+    qa, sm, benchmark = make_adapters(market, benchmark)
     storage = Storage(db)
     orch = ReplayOrchestrator(reasoner, qa, sm, storage=storage, market=market)
     _, path = orch.replay(
@@ -99,14 +151,19 @@ def find_similar(
     db: str = typer.Option(_DEFAULT_DB, "--db"),
 ) -> None:
     """Phase 2：检索相似历史 Pattern。"""
+    sd = _require_enum(shock_dimension, ShockDimension, "--shock-dimension")
+    idir = _require_enum(direction, ImpactDirection, "--direction")
     embedder = Embedder()
     storage = Storage(db)
     svc = PatternService(storage, reasoner=None, embedder=embedder)  # type: ignore[arg-type]
-    sd = ShockDimension(shock_dimension) if shock_dimension else None
-    idir = ImpactDirection(direction) if direction else None
-    results = svc.find_similar(desc, shock_dimension=sd, impact_direction=idir, industry=industry, top_k=top_k)
+    results, degraded = svc.find_similar(desc, shock_dimension=sd, impact_direction=idir, industry=industry, top_k=top_k)
+    if degraded:
+        typer.echo("[warn] 向量检索不可用（embedding 失败），以下为纯结构化过滤结果，相似度不可比")
     if not results:
-        typer.echo("[empty] 无匹配 Pattern（规律库为空或过滤过严；先 replay + extract-pattern 建库）")
+        if degraded:
+            typer.echo("[empty] 检索不可用且无结构化命中（不代表无相似 Pattern）")
+        else:
+            typer.echo("[empty] 无匹配 Pattern（规律库为空或过滤过严；先 replay + extract-pattern 建库）")
         return
     for p, score in results:
         typer.echo(
@@ -152,16 +209,12 @@ def forward(
     feishu: str | None = typer.Option(_DEFAULT_FEISHU, "--feishu-webhook", help="飞书 webhook URL（默认读 .env FEISHU_WEBHOOK）"),
 ) -> None:
     """Phase 3：前瞻映射——检索相似历史 Pattern，预判受益/受损标的 + 预期 CAR 区间。"""
+    date = _require_iso_date(date, "--date")
+    if mode not in ("pre", "post"):
+        raise typer.BadParameter("合法取值：pre（盘前前瞻）、post（盘后校准）", param_hint="--mode")
     typer.echo(f"[forward] {desc[:40]}... date={date} market={market} mode={mode} top_k={top_k}")
     reasoner = ClaudeCodeProvider(model_alias=model)
-    if market == "港股":
-        from .adapters.hk_quote_adapter import HKQuoteAdapter
-        from .adapters.hk_stock_master import HKStockMaster
-        qa = HKQuoteAdapter()
-        sm = HKStockMaster()
-    else:
-        qa = AkshareQuoteAdapter()
-        sm = StockMaster()
+    qa, sm, _ = make_adapters(market)
     storage = Storage(db)
     embedder = Embedder()
     ps = PatternService(storage, reasoner, embedder)
@@ -223,30 +276,23 @@ def batch_replay(
 
     typer.echo(f"[batch-replay] {job_file} market={market}")
     reasoner = ClaudeCodeProvider(model_alias=model)
-    if market == "港股":
-        from .adapters.hk_quote_adapter import HKQuoteAdapter
-        from .adapters.hk_stock_master import HKStockMaster
-        qa = HKQuoteAdapter()
-        sm = HKStockMaster()
-        benchmark = benchmark if benchmark != _DEFAULT_BENCHMARK else "HSI"
-    else:
-        qa = AkshareQuoteAdapter()
-        sm = StockMaster()
+    qa, sm, benchmark = make_adapters(market, benchmark)
     storage = Storage(db)
     embedder = Embedder()
     ps = PatternService(storage, reasoner, embedder)
     orch = ReplayOrchestrator(reasoner, qa, sm, storage=storage, market=market)
     dedup = EventDedup(storage)
     runner = BatchReplayRunner(orch, ps, dedup, benchmark=benchmark)
-    cands = read_candidates(job_file)
-    typer.echo(f"[load] {len(cands)} 候选事件")
+    cands, invalid_dates = read_candidates(job_file, echo=typer.echo)
+    typer.echo(f"[load] {len(cands)} 候选事件（{invalid_dates} 个因缺/非法日期被剔除，已计入 failed）")
     prog = runner.run(cands, sleep_s=sleep)
+    prog["failed"] += invalid_dates
     typer.echo(f"[done] {prog}")
 
 
 @app.command("monitor")
 def monitor(
-    interval: int = typer.Option(_DEFAULT_INTERVAL, "--interval", help="采集间隔（分钟，默认读 .env MONITOR_INTERVAL）"),
+    interval: str | None = typer.Option(None, "--interval", help="采集间隔分钟（整数；缺省读 .env MONITOR_INTERVAL，默认 240）"),
     webhook: str | None = typer.Option(None, "--push-webhook", help="企微/钉钉 webhook URL"),
     feishu: str | None = typer.Option(_DEFAULT_FEISHU, "--feishu-webhook", help="飞书 webhook URL（默认读 .env FEISHU_WEBHOOK）"),
     significance: int = typer.Option(3, "--significance", help="重大性阈值（≥）"),
@@ -258,21 +304,22 @@ def monitor(
     db: str = typer.Option(_DEFAULT_DB, "--db"),
 ) -> None:
     """Phase 4 功能1：定时监测新闻 → 高分事件 forward → 推送。"""
-    import time
-
     from .adapters.news_adapter import (
         AkshareNewsAdapter, CLSNewsAdapter, CCTVNewsAdapter,
         Jin10NewsAdapter, JiuyanNewsAdapter, MultiSourceNewsAdapter,
     )
     from .pipeline.event_dedup import EventDedup
-    from .pipeline.monitoring_pusher import MonitoringPusher
+    from .pipeline.monitoring_pusher import MonitoringPusher, run_monitor_loop
     from .pipeline.nodes.event_extractor import EventExtractor
     from .pipeline.push_channel import FeishuChannel, FileChannel, WebhookChannel
 
-    typer.echo(f"[monitor] interval={interval}min source={source} sig>={significance} a_share>={a_share}")
+    # 间隔解析移到命令体内：.env 写错值不至于让所有 CLI 命令在导入期崩溃
+    interval_min, warn = _parse_interval_minutes(interval if interval is not None else os.getenv("MONITOR_INTERVAL"))
+    if warn:
+        typer.echo(f"[monitor] {warn}")
+    typer.echo(f"[monitor] interval={interval_min}min source={source} sig>={significance} a_share>={a_share}")
     reasoner = ClaudeCodeProvider(model_alias=model)
-    qa = AkshareQuoteAdapter()
-    sm = StockMaster()
+    qa, sm, _ = make_adapters("A股")  # 监测当前仅 A 股；与 replay/forward 装配同源
     storage = Storage(db)
     embedder = Embedder()
     ps = PatternService(storage, reasoner, embedder)
@@ -296,10 +343,16 @@ def monitor(
         channels.append(FeishuChannel(feishu))
     pusher = MonitoringPusher(news, extractor, fwd_orch, dedup, channels)
     try:
-        while True:
-            pusher.run_once(significance_min=significance, a_share_min=a_share, surprise_min=surprise, impact_min=impact)
-            typer.echo(f"[monitor] sleep {interval}min... (Ctrl-C 停止)")
-            time.sleep(interval * 60)
+        # 主循环体整体兜底：单轮任何异常 echo 后继续 sleep（监控的核心要求是持续运行）
+        run_monitor_loop(
+            pusher,
+            interval_min=interval_min,
+            echo=typer.echo,
+            significance_min=significance,
+            a_share_min=a_share,
+            surprise_min=surprise,
+            impact_min=impact,
+        )
     except KeyboardInterrupt:
         typer.echo("[monitor] stopped")
 

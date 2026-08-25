@@ -25,26 +25,47 @@ class ImpactMeasurementNode(Node):
         event = inputs["event"]
         candidates = inputs["candidates"]
         bench = inputs["bench_df"]
-        episode_id = event.episodes[0].id
-        start = event.reaction_date - timedelta(days=350)
-        end = event.reaction_date + timedelta(days=200)
+        replay_id = str(inputs.get("_replay_id", "adhoc"))
         results = []
+        # 多 episode：遍历全部子事件度量（spec §4.6）
+        for ep in event.episodes:
+            self._measure_episode(
+                event, ep, candidates, bench, replay_id, results,
+            )
+        # 同一标的出现多个 episode 时，下游（attribution 首见去重 / 报告代表选取）
+        # 统一取 |car_0_20| 最大的度量为代表——这里按 |car_0_20| 降序排，
+        # 使"首见"即为代表度量
+        results.sort(key=lambda m: abs(m.car_0_20 or 0.0), reverse=True)
+        return results
+
+    def _measure_episode(
+        self,
+        event: Any,
+        ep: Any,
+        candidates: list[dict],
+        bench: Any,
+        replay_id: str,
+        results: list,
+    ) -> None:
+        episode_id = ep.id
+        start = ep.reaction_date - timedelta(days=350)
+        end = ep.reaction_date + timedelta(days=200)
         for c in candidates:
             code = c["stock_id"]
             resolved = self.sm.resolve(code)
             if resolved is None:
                 if self.storage:
-                    self.storage.append_skip(replay_id="adhoc", stock_id=code, episode_id=episode_id, reason="resolve 失败")
+                    self.storage.append_skip(replay_id=replay_id, stock_id=code, episode_id=episode_id, reason="resolve 失败")
                 continue
-            if not self.sm.is_real_at(code, event.reaction_date):
+            if not self.sm.is_real_at(code, ep.reaction_date):
                 if self.storage:
-                    self.storage.append_skip(replay_id="adhoc", stock_id=code, episode_id=episode_id, reason="事件日不在市（未上市/已退市）")
+                    self.storage.append_skip(replay_id=replay_id, stock_id=code, episode_id=episode_id, reason="事件日不在市（未上市/已退市）")
                 continue
             try:
                 q = self.qa.daily_adjusted(code, start, end)
             except Exception as e:
                 if self.storage:
-                    self.storage.append_skip(replay_id="adhoc", stock_id=code, episode_id=episode_id, reason=f"行情拉取失败:{type(e).__name__}")
+                    self.storage.append_skip(replay_id=replay_id, stock_id=code, episode_id=episode_id, reason=f"行情拉取失败:{type(e).__name__}")
                 continue
             # 双层基准：按标的 L1 行业拉对应行业指数
             bench_ind = None
@@ -60,7 +81,7 @@ class ImpactMeasurementNode(Node):
                 episode_id=episode_id,
                 quotes=q,
                 bench=bench,
-                reaction_date=event.reaction_date,
+                reaction_date=ep.reaction_date,
                 board=resolved.board,
                 is_st=resolved.is_st,
                 listing_date=resolved.listing_date,
@@ -69,7 +90,7 @@ class ImpactMeasurementNode(Node):
             )
             if m is None:
                 if self.storage:
-                    self.storage.append_skip(replay_id="adhoc", stock_id=code, episode_id=episode_id, reason="度量返回 None（新股/数据不足）")
+                    self.storage.append_skip(replay_id=replay_id, stock_id=code, episode_id=episode_id, reason="度量返回 None（新股/数据不足）")
                 continue
             m.chain_node_id = c.get("chain_node_id")
             m.rationale = c.get("rationale")
@@ -80,4 +101,3 @@ class ImpactMeasurementNode(Node):
             elif self.classifier:
                 m.sw_industry_l3 = self.classifier(code)
             results.append(m)
-        return results

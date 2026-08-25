@@ -38,11 +38,13 @@ def _to_replay_json(replay_ctx: dict[str, Any]) -> str:
     e = replay_ctx["event"]
     ar = replay_ctx.get("attribution_result")
     ms = replay_ctx.get("measurements", [])
+    pool_stats = (getattr(ar, "pool_stats", None) or {}) if ar else {}
     data = {
         "event": e.model_dump(mode="json"),
         "beneficiary": [m.model_dump(mode="json") for m in (ar.beneficiary_pool if ar else [])],
         "victim": [m.model_dump(mode="json") for m in (ar.victim_pool if ar else [])],
-        "pool_stats": (ar.pool_stats if ar and hasattr(ar, "pool_stats") else {}),
+        # 结构化 JSON（而非 Python repr：LLM 从 repr 读 p 值易错读）
+        "pool_stats": {k: v.model_dump() if hasattr(v, "model_dump") else v for k, v in pool_stats.items()},
         "measurements": [
             {
                 "stock_id": m.stock_id,
@@ -93,14 +95,16 @@ class PatternExtractor(LLMNode):
             "你是 A 股事件复盘规律提炼师。基于一个完整复盘（事件+受益/受损标的+量化度量），"
             "提炼可复用规律模板：① 事件签名（冲击维度/影响方向/类型/受影响行业）；"
             "② ≤200 字标准化事件摘要；③ 传导模板（事件→产业链→标的 的因果链）；"
-            "④ 典型受益/受损标的及其观察到的 CAR[0,+20]/[0,+60] 与持续性说明；"
+            "④ 典型受益/受损标的（其 observed_car 会被系统按真实度量核对回填："
+            "有度量的标的取度量真值、无度量的置空，LLM 数值不采信——无需精确估计 CAR）；"
             "⑤ 事件级定性 qualitative 4 维——"
             "magnitude 影响程度(极大/大/中/小:池|caar|>20%且n>10→极大,10-20%→大,5-10%→中,<5%→小)；"
             "scope 影响范围(广/中/窄:池n>20或行业>5→广,10-20→中,<10→窄)；"
             "persistence 持续时间(长期/中期/短期脉冲:event_aggregates的persistence_ratio_median>1.5→长期,0.7-1.5→中期,<0.7→短期)；"
             "significance 显著性(显著/不显著:pool_stats的p值<0.05→显著；注意 grank_p 字段当前装的是横截面CAR[0,+20]简化t检验的p值)；"
             "surprise 超预期性(超预期/符合预期/利好出尽:measurements的car_pre_20绝对值<3%+事件后CAR显著→超预期,car_pre_20>10%+CAR反向→利好出尽)；"
-            "qualitative.rationale 给一句综合依据,qualitative.pool_caar_beneficiary/victim 填池 caar 数值。"
+            "qualitative.rationale 给一句综合依据；qualitative.pool_caar_beneficiary/victim "
+            "由系统按 pool_stats 真值回填（与④同理不采信 LLM 数值），可留空。"
             "只输出 JSON。"
         )
 
@@ -109,15 +113,64 @@ class PatternExtractor(LLMNode):
 
     def post_process(self, llm: _PatternLLM, inputs: dict[str, Any]) -> Pattern:
         source_replay_id = inputs["source_replay_id"]
-        try:
-            sd = ShockDimension(llm.shock_dimension)
-        except ValueError:
-            sd = ShockDimension.POLICY
-        try:
-            idir = ImpactDirection(llm.impact_direction)
-        except ValueError:
-            idir = ImpactDirection.NEUTRAL
+        replay_ctx: dict[str, Any] = inputs.get("replay_context") or {}
+        measurements: list[Any] = replay_ctx.get("measurements") or []
+        ar = replay_ctx.get("attribution_result")
+
+        # 数值对账：LLM 抄录的 CAR 一律不采信——有度量则回填真值，无度量置 None
+        # （否则幻觉值会成为前瞻"预期 CAR"来源贯穿全链）
+        m_by_stock = {m.stock_id: m for m in measurements}
+
+        def _reconcile(stocks: list[_ArchetypalStockOut]) -> list[ArchetypalStock]:
+            out: list[ArchetypalStock] = []
+            for s in stocks:
+                # 组内多个标的都有度量时取 |car_0_20| 最大者为代表
+                # （"典型标的"本意即反应最强者，按 LLM 列出顺序取首个是任意行为）
+                hits = [m_by_stock[x] for x in s.stocks if x in m_by_stock]
+                rep = max(hits, key=lambda m: abs(m.car_0_20 or 0.0), default=None)
+                out.append(
+                    ArchetypalStock(
+                        industry_node=s.industry_node,
+                        stocks=s.stocks,
+                        observed_car_0_20=rep.car_0_20 if rep else None,
+                        observed_car_0_60=rep.car_0_60 if rep else None,
+                        persistence_note=s.persistence_note,
+                    )
+                )
+            return out
+
+        # 池 caar 同样对账：只从 replay_context 的 pool_stats 回填
+        pool_stats = (getattr(ar, "pool_stats", None) or {}) if ar else {}
+
+        def _pool_caar(key: str) -> float | None:
+            stat = pool_stats.get(key)
+            return getattr(stat, "caar", None)
+
+        qualitative = llm.qualitative
+        if qualitative is not None:
+            qualitative = qualitative.model_copy(
+                update={
+                    "pool_caar_beneficiary": _pool_caar("beneficiary"),
+                    "pool_caar_victim": _pool_caar("victim"),
+                }
+            )
+
+        # 非法枚举 → None（shock_dimension 是检索硬过滤键，虚构默认桶=永远检索不到）
+        def _safe_enum(enum_cls, value):
+            try:
+                return enum_cls(value)
+            except ValueError:
+                return None
+
+        sd = _safe_enum(ShockDimension, llm.shock_dimension)
+        idir = _safe_enum(ImpactDirection, llm.impact_direction)
+
         embedding = self.embedder.embed(llm.event_summary)
+        if embedding is None:
+            print(
+                f"[pattern] embedding 失败 pat-{source_replay_id} "
+                "将对向量检索不可见（可跑 spikes/reembed_patterns.py 补救）"
+            )
         return Pattern(
             id=f"pat-{source_replay_id}",
             source_replay_id=source_replay_id,
@@ -132,10 +185,8 @@ class PatternExtractor(LLMNode):
             event_summary=llm.event_summary,
             embedding=embedding,
             transmission_template=llm.transmission_template,
-            archetypal_beneficiaries=[
-                ArchetypalStock(**s.model_dump()) for s in llm.archetypal_beneficiaries
-            ],
-            archetypal_victims=[ArchetypalStock(**s.model_dump()) for s in llm.archetypal_victims],
+            archetypal_beneficiaries=_reconcile(llm.archetypal_beneficiaries),
+            archetypal_victims=_reconcile(llm.archetypal_victims),
             evidence_replay_ids=[source_replay_id],
-            qualitative=llm.qualitative,
+            qualitative=qualitative,
         )

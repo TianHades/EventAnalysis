@@ -16,7 +16,12 @@ class PushChannel(Protocol):
 
 
 class WebhookChannel:
-    """企微/钉钉机器人 webhook（markdown 消息）。"""
+    """企微/钉钉机器人 webhook（markdown 消息）。
+
+    注意：企微/钉钉出错时仍返回 HTTP 200 + body errcode≠0，必须解析 body 判定。
+    """
+
+    is_archive = False  # 实时渠道（推送成功判定依据）
 
     def __init__(self, webhook_url: str, timeout: int = 10) -> None:
         self.url = webhook_url
@@ -28,7 +33,17 @@ class WebhookChannel:
         payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown}}
         try:
             r = requests.post(self.url, json=payload, timeout=self.timeout)
-            return r.status_code == 200
+            if r.status_code != 200:
+                return False
+            try:
+                data = r.json()
+            except Exception:
+                return True  # 响应体非 JSON（部分网关无 body）：以 HTTP 状态为准
+            code = data.get("errcode", data.get("code", 0))
+            if code != 0:
+                print(f"[push] webhook 拒绝: errcode={code} errmsg={data.get('errmsg', data.get('msg', ''))}")
+                return False
+            return True
         except Exception:
             return False
 
@@ -145,6 +160,8 @@ class FeishuChannel:
     使用 interactive 卡片：分章节 div + 分割线 + 底部备注，比纯文本美观。
     """
 
+    is_archive = False  # 实时渠道（推送成功判定依据）
+
     def __init__(self, webhook_url: str, timeout: int = 10) -> None:
         self.url = webhook_url
         self.timeout = timeout
@@ -163,7 +180,14 @@ class FeishuChannel:
 
 
 class FileChannel:
-    """写本地文件（reports/monitoring/）。"""
+    """写本地文件（reports/monitoring/）。
+
+    归档渠道：push 恒成功，不作为"推送是否成功"的判定依据
+    （否则实时渠道全挂时仍会 mark_seen，架空重试设计）。仅当配置里
+    只有 archive 渠道时才以其为准（事件不丢）。
+    """
+
+    is_archive = True  # 归档渠道标记（monitoring_pusher 的 pushed_ok 判定跳过）
 
     def __init__(self, out_dir: str | Path = "reports/monitoring") -> None:
         self.out_dir = Path(out_dir)

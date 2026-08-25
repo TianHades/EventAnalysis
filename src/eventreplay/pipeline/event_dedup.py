@@ -11,15 +11,17 @@ from ..storage import Storage
 def make_dedup_key(
     event_type: str, date_str: str, key_entities: list[str], description: str = ""
 ) -> str:
-    """事件类型 + 日期 + 标准化描述 → md5 hash。
+    """事件类型 + 日期 + 全量标准化描述 → md5 hash。
 
     用 description（稳定）替代 entities（多变），同事件不同报道/entities 也能去重。
+    规范化全文参与 hash、不截断：截断（旧实现 [:100]）会让前 100 字相同、
+    结论相反的长描述合并成同 key。
     description 为空时回退到 sorted(key_entities)（向后兼容）。
     """
     if description:
-        # 标准化：去空白/标点/转小写，取前100字
+        # 标准化：去空白/标点/转小写（全文参与 hash，不截断）
         import re
-        norm = re.sub(r"[\s　\W]+", "", description.lower())[:100]
+        norm = re.sub(r"[\s　\W]+", "", description.lower())
         raw = f"{event_type}|{date_str}|{norm}"
     else:
         raw = f"{event_type}|{date_str}|{','.join(sorted(key_entities))}"

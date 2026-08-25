@@ -198,3 +198,93 @@ def test_replay_market_tag(tmp_path):
     e = storage.get_event("hk_evt")
     assert e is not None
     assert e.market == "港股"
+
+
+# ---- Fix 9a: Replay 状态接线 ----
+
+
+def test_replay_status_done_on_success(tmp_path):
+    """成功 → replays 表 status='done'（finished_at 落值）。"""
+    storage = Storage(tmp_path / "t.db")
+    orch = ReplayOrchestrator(
+        FakeReasoner(), FakeQuoteAdapter(), FakeStockMaster(),
+        storage=storage, reports_dir=tmp_path / "reports",
+    )
+    orch.replay(
+        description="双减政策落地", announcement_date="2021-07-24",
+        reaction_date=_REACTION.isoformat(), event_id="ok_evt",
+    )
+    r = storage.get_replay("ok_evt")
+    assert r is not None
+    assert r.status == "done"
+    assert r.finished_at is not None
+    assert r.event_id == "ok_evt"
+
+
+def test_replay_status_failed_and_reraise(tmp_path):
+    """中途节点失败 → status='failed' 落库后原异常 re-raise（半成品可辨识）。"""
+    import pytest
+
+    class FailSynthReasoner(FakeReasoner):
+        def call(self, *, system, user, output_model):
+            if output_model is _SynthOut:
+                raise RuntimeError("模拟 synthesis 失败")
+            return super().call(system=system, user=user, output_model=output_model)
+
+    storage = Storage(tmp_path / "t.db")
+    orch = ReplayOrchestrator(
+        FailSynthReasoner(), FakeQuoteAdapter(), FakeStockMaster(),
+        storage=storage, reports_dir=tmp_path / "reports",
+    )
+    with pytest.raises(RuntimeError, match="synthesis 失败"):
+        orch.replay(
+            description="某政策冲击", announcement_date="2022-03-01",
+            reaction_date=_REACTION.isoformat(), event_id="fail_evt",
+        )
+    r = storage.get_replay("fail_evt")
+    assert r is not None
+    assert r.status == "failed"
+
+
+# ---- EventIngest：盘后 → 次交易日 + 日期解析容错 ----
+
+
+def test_ingest_after_close_reaction_next_day():
+    """盘后公告 → reaction_date = announcement_date + 1 天；显式 reaction_date 优先。"""
+    from eventreplay.pipeline.nodes.ingest import EventIngestNode, _IngestOut
+
+    class _ATReasoner:
+        model_alias = "fake"
+
+        def call(self, *, system, user, output_model):
+            assert output_model is _IngestOut
+            return _IngestOut(event_type="政策", announcement_time="盘后")
+
+    node = EventIngestNode(_ATReasoner())
+    inputs = {"description": "盘后出的政策", "announcement_date": "2021-07-23"}
+    e = node.run(inputs)
+    assert e.reaction_date == date(2021, 7, 24)  # 盘后 → 次日
+    assert e.announcement_date == date(2021, 7, 23)
+    assert e.announcement_time.value == "盘后"
+
+    # 显式 reaction_date 优先级不变
+    inputs2 = {"description": "盘后出的政策", "announcement_date": "2021-07-23", "reaction_date": "2021-07-30"}
+    e2 = node.run(inputs2)
+    assert e2.reaction_date == date(2021, 7, 30)
+
+
+def test_ingest_invalid_date_raises_clear_error():
+    """announcement_date 不可解析 → 抛带清晰信息的 ValueError（节点层兜底）。"""
+    import pytest
+
+    from eventreplay.pipeline.nodes.ingest import EventIngestNode, _IngestOut
+
+    class _R:
+        model_alias = "fake"
+
+        def call(self, *, system, user, output_model):
+            return _IngestOut(event_type="政策")
+
+    node = EventIngestNode(_R())
+    with pytest.raises(ValueError, match="公告日期不可解析"):
+        node.run({"description": "x", "announcement_date": "not-a-date"})

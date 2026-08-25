@@ -57,7 +57,11 @@ class ReportNode(LLMNode):
             "chain_narrative": chain.narrative[:3000] if chain and chain.narrative else "",
             "beneficiary": [m.model_dump() for m in ar.beneficiary_pool],
             "victim": [m.model_dump() for m in ar.victim_pool],
-            "pool_stats": ar.pool_stats if hasattr(ar, "pool_stats") else {},
+            # 结构化 JSON（而非 Python repr：LLM 从 repr 读 p 值易错读）
+            "pool_stats": {
+                k: (v.model_dump() if hasattr(v, "model_dump") else v)
+                for k, v in (getattr(ar, "pool_stats", None) or {}).items()
+            },
             "measurements": [
                 {
                     "stock_id": m.stock_id,

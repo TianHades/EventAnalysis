@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from .common import StockDirection
 from .event import Event
 from .chain import ChainNode
 from .pattern import Pattern
+
+CalibrationStatus = Literal[
+    "confirming",  # 实际 CAR 达预期方向 50% 达标线
+    "diverging",   # 实际 CAR 与预期方向相反
+    "neutral",     # 方向一致但未达标线（真实走平）
+    "pending",     # 数据窗不足（t0 当天 / 度量不可得）
+    "no_range",    # 纯定性预判（无预期区间，无从校准）
+    "parse_error", # 预期区间字符串解析失败
+]
 
 
 class ForwardPrediction(BaseModel):
@@ -23,7 +34,7 @@ class ForwardPrediction(BaseModel):
     # 盘后校准（仅 post 模式 + strong 层）
     actual_car_0_1: float | None = None
     actual_car_0_5: float | None = None
-    calibration: str | None = None  # confirming / diverging / neutral
+    calibration: CalibrationStatus | None = None
 
 
 class ForwardResult(BaseModel):

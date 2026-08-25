@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -12,6 +12,7 @@ from ..adapters.stock_master import StockMaster
 from ..adapters.theme_index import ThemeIndex
 from ..adapters.tushare_source import TushareSource
 from ..llm import Reasoner
+from ..schema import Replay
 from ..storage import Storage
 from .nodes import (
     AttributionNode,
@@ -22,6 +23,16 @@ from .nodes import (
     ReportNode,
     TransmissionChainNode,
 )
+
+
+def make_recall_sources() -> tuple[TushareSource, list]:
+    """成分股召回源装配（Replay/Forward 编排共用）。
+
+    返回 (tushare_source, sources)：tushare 权威（sources[0]，有缓存就用，
+    供 classify/ts_source 复用）+ curated ThemeIndex 兜底。
+    """
+    ts = TushareSource()
+    return ts, [ts, ThemeIndex()]
 
 
 class ReplayOrchestrator:
@@ -42,15 +53,28 @@ class ReplayOrchestrator:
         self.market = market
         self.ingest = EventIngestNode(reasoner, storage)
         self.chain = IndustryChainNode(reasoner, storage)
-        # 成分股召回源 + 行业分类器：tushare 权威（有缓存就用）+ curated 兜底
-        self._ts = TushareSource()  # 始终创建（从磁盘缓存读，无 token 也能用）
-        sources = [ThemeIndex()]
-        sources.insert(0, self._ts)  # tushare 优先
+        # 成分股召回源 + 行业分类器：tushare 权威（sources[0]，有缓存就用）+ curated 兜底
+        self._ts, sources = make_recall_sources()
         self.cand = CandidateNode(reasoner, stock_master, storage, sources)
         self.impact = ImpactMeasurementNode(quote_adapter, stock_master, storage, industry_classifier=self._ts.classify, ts_source=self._ts)
         self.attr = AttributionNode(storage)
         self.synth = TransmissionChainNode(reasoner, storage)
         self.report = ReportNode(reasoner, storage)
+
+    def _make_replay_record(self, replay_id: str, event_id: str, status: str, started_at: datetime,
+                            finished_at: datetime | None = None, report_path: str | None = None) -> Replay:
+        return Replay(
+            id=replay_id,
+            event_id=event_id,
+            pipeline_version="1",
+            prompt_hash="",
+            model_alias=getattr(self.reasoner, "model_alias", "") or "",
+            cli_version="",
+            started_at=started_at,
+            finished_at=finished_at,
+            status=status,
+            report_path=report_path,
+        )
 
     def replay(
         self,
@@ -61,8 +85,44 @@ class ReplayOrchestrator:
         event_id: str = "evt",
         benchmark: str = "sh000300",
     ) -> tuple[str, Path]:
+        # Replay 状态接线：开始 running、成功 done、异常 failed 后 re-raise，
+        # 让半成品（C2）在 replays 表里可辨识，而非只在报告缺失时被发现
+        started = datetime.utcnow()
+        if self.storage is not None:
+            self.storage.save_replay(self._make_replay_record(event_id, event_id, "running", started))
+        try:
+            markdown, path = self._replay_inner(
+                description=description,
+                announcement_date=announcement_date,
+                reaction_date=reaction_date,
+                event_id=event_id,
+                benchmark=benchmark,
+                ctx={"_replay_id": event_id},
+            )
+        except Exception:
+            if self.storage is not None:
+                self.storage.save_replay(
+                    self._make_replay_record(event_id, event_id, "failed", started, finished_at=datetime.utcnow())
+                )
+            raise
+        if self.storage is not None:
+            self.storage.save_replay(
+                self._make_replay_record(event_id, event_id, "done", started, finished_at=datetime.utcnow(),
+                                         report_path=str(path))
+            )
+        return markdown, path
+
+    def _replay_inner(
+        self,
+        *,
+        description: str,
+        announcement_date: str,
+        reaction_date: str | None,
+        event_id: str,
+        benchmark: str,
+        ctx: dict,
+    ) -> tuple[str, Path]:
         rd = reaction_date or announcement_date
-        ctx = {"_replay_id": event_id}
 
         event = self.ingest.run_cached(
             {

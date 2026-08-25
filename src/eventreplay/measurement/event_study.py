@@ -75,14 +75,16 @@ def measure_stock(
     t0 = int(on_after.index[0])
 
     est_lo, est_hi = t0 - _EST_LEFT, t0 - _EST_RIGHT
-    if est_lo < 0:
-        return None  # 估计窗不足
-    est = df.iloc[est_lo : est_hi + 1]
+    est_start = max(est_lo, 0)  # 左界不足时从头截取（负索引切片会从尾部起算，须钳位）
+    est = df.iloc[est_start : est_hi + 1]
     if len(est) < 60:
-        # 低置信但仍计算（标注）
-        low_conf, reason = True, f"估计窗有效日{len(est)}<60"
-    else:
-        low_conf, reason = cleaned.low_confidence, cleaned.reason
+        return None  # 估计窗有效日 <60 → skip（spec §4.5）
+    low_conf, reason = cleaned.low_confidence, cleaned.reason
+    if len(est) < 100:
+        # 估计窗 60-99 有效日：低置信保留（spec §4.5），叠加清洗阶段已有 reason
+        est_reason = f"估计窗有效日{len(est)}<100"
+        reason = f"{reason}; {est_reason}" if reason else est_reason
+        low_conf = True
 
     stock_ret = simple_returns(est["close"]).to_numpy()
     bench_ret = simple_returns(est["close_bench"]).to_numpy()
@@ -124,9 +126,9 @@ def measure_stock(
     sig_days = sig_ar_streak(ar_evt, sigma)
     # 成交量事件窗
     vol = df["volume"].to_numpy() if "volume" in df.columns else None
-    aav = 0
+    aav = None  # volume 列缺失/估计窗样本不足 → 数据不可得，不冒充"无异常放量"(0)
     if vol is not None:
-        vol_est = vol[est_lo : est_hi + 1]
+        vol_est = vol[est_start : est_hi + 1]
         vol_est = vol_est[np.isfinite(vol_est)]
         if len(vol_est) > 1:
             vol_evt = vol[t0 : min(t0 + 91, len(vol))]
@@ -146,16 +148,18 @@ def measure_stock(
             continue
         pct = (cur_c / prev_c) - 1.0
         d = dates[idx].item() if hasattr(dates[idx], "item") else dates[idx]
-        # 新股不可能出现在这里：clean_quotes 已按上市>=365 日历天剔除
+        # is_new_first5 恒 False 的前提：clean_quotes 已按上市 >=365 日历天剔除新股，
+        # 能走到这里的标的不可能处于上市前 5 个交易日（那期间主板 2023-04-10 起不设限）
         lim = daily_limit_pct(board or Board.MAIN, is_st=is_st, is_new_first5=False, d=d)
-        hit = limit_hit(pct, lim)
+        hit = limit_hit(pct, lim, prev_close=prev_c)
         if hit == "up":
             up_days += 1
         elif hit == "down":
             down_days += 1
 
-    # 峰值 AR / 最大回撤（事件窗）
+    # 峰值/谷值 AR / 最大回撤（事件窗）：受损标的看谷值（峰值只报 max 对负向信号无意义）
     peak_ar = float(np.max(ar_evt)) if len(ar_evt) else None
+    trough_ar = float(np.min(ar_evt)) if len(ar_evt) else None
     cum = np.cumsum(ar_evt) if len(ar_evt) else np.array([])
     max_dd = float(min(0.0, -(np.maximum.accumulate(cum) - cum).max())) if len(cum) else None
 
@@ -165,13 +169,15 @@ def measure_stock(
     car_ind_0_20 = car_ind_0_60 = car_ind_0_90 = None
     if "close_industry" in df.columns:
         ci = df["close_industry"].to_numpy(dtype=float)
-        est_ci = ci[est_lo : est_hi + 1]
+        est_ci = ci[est_start : est_hi + 1]
         if len(est_ci) >= 2 and np.isfinite(est_ci).all():
             ind_ret_est = est_ci[1:] / est_ci[:-1] - 1.0
             if len(ind_ret_est) >= 30 and len(ind_ret_est) >= n and np.isfinite(ind_ret_est).all():
                 alpha_i, beta_i, _ = fit_market_model(stock_ret, ind_ret_est[-n:])
                 ret_ind_all = ci[1:] / ci[:-1] - 1.0  # 与 full_stock 同基（第 k 项 ↔ df 第 k+1 行）
-                ar_ind = ret_ind_all - (alpha_i + beta_i * full_stock)
+                # AR = R_stock − (α + β·R_ind)：fit_market_model 第一参数是因变量（个股），
+                # 残差须以个股收益为被减项；写反则事件信号以 −β 系数进入（符号反转）
+                ar_ind = full_stock - (alpha_i + beta_i * ret_ind_all)
 
                 def _ind_car(hi: int) -> float | None:
                     end = ar_t0 + hi
@@ -206,6 +212,7 @@ def measure_stock(
         car_pre_20=car_pre_20,
         car_neg1_0=car_neg1_0,
         peak_ar=peak_ar,
+        trough_ar=trough_ar,
         max_drawdown=max_dd,
         limit_up_days=up_days,
         limit_down_days=down_days,

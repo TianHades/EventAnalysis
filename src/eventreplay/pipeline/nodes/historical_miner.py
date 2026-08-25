@@ -11,14 +11,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
 from ...llm import Reasoner
-from ...schema import CandidateEvent, Event, ImpactDirection, ShockDimension
+from ...schema import AnnouncementTime, CandidateEvent, Event, ImpactDirection, ShockDimension
 from ..event_dedup import make_dedup_key
 
 
@@ -32,6 +32,7 @@ class _MinedEventOut(BaseModel):
     shock_dimension: str | None = None
     impact_direction: str | None = None
     announcement_date: str  # YYYY-MM-DD
+    announcement_time: Literal["盘前", "盘中", "盘后", "非交易日"] | None = None
     key_entities: list[str] = Field(default_factory=list)
     industries: list[str] = Field(default_factory=list)
     significance: int  # 1-4
@@ -56,19 +57,22 @@ class _EventSelectOut(BaseModel):
     rejected: list[_SelectItemOut] = Field(default_factory=list)
 
 
-_MINE_SYSTEM = (
-    "你是 A 股事件研究分析师。列出给定日期范围内值得复盘的候选 A 股相关事件（广撒网）。\n\n"
-    "要求：\n"
-    "① 列出尽可能多的候选（含各级重要性，供后续筛选，不要预先过度筛选）\n"
-    "② 重大性打分（1-4）：4=系统级（冲击全市场）；3=主线级（引领主线、多板块）；2=行业级；1=主题/噪音\n"
-    "③ A股可达性（1-5）：是否有明确可映射的 A 股标的\n"
-    "④ 突发性（1-5）：1=完全预期内（预告/渐进/日程已知），5=完全突发（无预警）\n"
-    "⑤ 超预期性（1-5）：1=符合市场共识预期，5=远超预期（力度/范围/时点超预期）\n"
-    "⑥ 影响规模（1-5）：预估相关标的CAR幅度，5=极大(>20%)，4=大(10-20%)，3=中(5-10%)，2=小(<5%)，1=微\n"
-    "⑦ 每个事件含：description / event_type / shock_dimension(供给/需求/政策/流动性/情绪) / "
-    "impact_direction(利好/利空/中性/混合) / announcement_date(YYYY-MM-DD) / key_entities / industries / rationale(为什么值得复盘)\n"
-    "只输出 JSON。"
-)
+def _mine_system(market: str = "A股") -> str:
+    """挖掘 system prompt：市场名动态注入（港股挖掘时评分口径一致）。"""
+    return (
+        f"你是{market}事件研究分析师。列出给定日期范围内值得复盘的候选{market}相关事件（广撒网）。\n\n"
+        "要求：\n"
+        "① 列出尽可能多的候选（含各级重要性，供后续筛选，不要预先过度筛选）\n"
+        "② 重大性打分（1-4）：4=系统级（冲击全市场）；3=主线级（引领主线、多板块）；2=行业级；1=主题/噪音\n"
+        f"③ 可达性（1-5）：是否有明确可映射的{market}标的\n"
+        "④ 突发性（1-5）：1=完全预期内（预告/渐进/日程已知），5=完全突发（无预警）\n"
+        "⑤ 超预期性（1-5）：1=符合市场共识预期，5=远超预期（力度/范围/时点超预期）\n"
+        "⑥ 影响规模（1-5）：预估相关标的CAR幅度，5=极大(>20%)，4=大(10-20%)，3=中(5-10%)，2=小(<5%)，1=微\n"
+        "⑦ 每个事件含：description / event_type / shock_dimension(供给/需求/政策/流动性/情绪) / "
+        "impact_direction(利好/利空/中性/混合) / announcement_date(YYYY-MM-DD) / "
+        "announcement_time(盘前/盘中/盘后/非交易日) / key_entities / industries / rationale(为什么值得复盘)\n"
+        "只输出 JSON。"
+    )
 
 _SELECT_SYSTEM = (
     "你是 A 股事件复盘选材师。给定候选事件列表，选出最值得复盘的 top_n 个。\n\n"
@@ -83,7 +87,9 @@ _SELECT_SYSTEM = (
 )
 
 
-def _build_event(out: _MinedEventOut) -> Event:
+def _build_event(out: _MinedEventOut) -> Event | None:
+    """日期不可解析 → None（调用方丢弃，不虚构 today()）。"""
+
     def _parse(d: str | None) -> date | None:
         if not d:
             return None
@@ -92,7 +98,15 @@ def _build_event(out: _MinedEventOut) -> Event:
         except ValueError:
             return None
 
-    ann = _parse(out.announcement_date) or date.today()
+    ann = _parse(out.announcement_date)
+    if ann is None:
+        return None
+    # 盘后/非交易日公告 → 首个反应日为公告日次日（event_study t0 对齐再推到下一交易日）
+    react = ann + timedelta(days=1) if out.announcement_time in ("盘后", "非交易日") else ann
+    try:
+        at = AnnouncementTime(out.announcement_time) if out.announcement_time else None
+    except ValueError:
+        at = None
     try:
         sd = ShockDimension(out.shock_dimension) if out.shock_dimension else None
     except ValueError:
@@ -103,7 +117,8 @@ def _build_event(out: _MinedEventOut) -> Event:
         idir = None
     eid = f"evt-{hashlib.md5(out.description.encode('utf-8')).hexdigest()[:12]}"
     return Event(
-        id=eid, description=out.description, announcement_date=ann, reaction_date=ann,
+        id=eid, description=out.description, announcement_date=ann, reaction_date=react,
+        announcement_time=at,
         event_type=out.event_type, shock_dimension=sd, impact_direction=idir,
         key_entities=out.key_entities,
     )
@@ -113,7 +128,8 @@ def _mine_out_to_dict(e: _MinedEventOut) -> dict:
     return {
         "description": e.description, "event_type": e.event_type,
         "shock_dimension": e.shock_dimension, "impact_direction": e.impact_direction,
-        "announcement_date": e.announcement_date, "key_entities": e.key_entities,
+        "announcement_date": e.announcement_date, "announcement_time": e.announcement_time,
+        "key_entities": e.key_entities,
         "industries": e.industries,
         "significance": _clamp(e.significance, 1, 4),
         "a_share_relevance": _clamp(e.a_share_relevance, 1, 5),
@@ -125,12 +141,14 @@ def _mine_out_to_dict(e: _MinedEventOut) -> dict:
 
 
 def _candidate_to_dict(c: CandidateEvent) -> dict:
+    at = c.event.announcement_time
     return {
         "dedup_key": c.dedup_key, "description": c.event.description,
         "event_type": c.event.event_type,
         "shock_dimension": c.event.shock_dimension.value if c.event.shock_dimension else None,
         "impact_direction": c.event.impact_direction.value if c.event.impact_direction else None,
         "announcement_date": str(c.event.announcement_date),
+        "announcement_time": at.value if at else None,
         "key_entities": c.event.key_entities, "industries": c.industries,
         "significance": c.significance, "a_share_relevance": c.a_share_relevance,
         "surprise_timing": c.surprise_timing, "surprise_magnitude": c.surprise_magnitude,
@@ -176,8 +194,8 @@ class HistoricalEventMiner:
             [_mine_out_to_dict(e) for e in raw], out_dir / f"mining_raw_{job_id}.json",
         )
 
-        # 阶段1.5：代码硬过滤
-        kept, dropped = self._hard_filter(raw)
+        # 阶段1.5：代码硬过滤（sig/a_share + 日期可解析/范围内）
+        kept, dropped = self._hard_filter(raw, start_date, end_date)
         echo(f"[mine] 阶段1.5 硬过滤：{len(raw)}→{len(kept)}（剔{len(dropped)}）")
         filtered_path = _write_json(
             {"kept": [_mine_out_to_dict(e) for e in kept], "dropped": dropped},
@@ -227,18 +245,31 @@ class HistoricalEventMiner:
             f"请列出最多 {raw_top} 个该范围内值得复盘的{market}候选事件（广撒网，含各级重要性）。"
         )
         out: _EventMineOut = self.reasoner.call(
-            system=_MINE_SYSTEM, user=user, output_model=_EventMineOut,
+            system=_mine_system(market), user=user, output_model=_EventMineOut,
         )
         return out.events
 
     @staticmethod
-    def _hard_filter(raw: list[_MinedEventOut]) -> tuple[list[_MinedEventOut], list[dict]]:
+    def _hard_filter(
+        raw: list[_MinedEventOut], start: str, end: str,
+    ) -> tuple[list[_MinedEventOut], list[dict]]:
         kept: list[_MinedEventOut] = []
         dropped: list[dict] = []
+        d_start, d_end = date.fromisoformat(start), date.fromisoformat(end)
         for e in raw:
             sig = _clamp(e.significance, 1, 4)
             a = _clamp(e.a_share_relevance, 1, 5)
-            if sig < 2:
+            try:
+                ann = date.fromisoformat(str(e.announcement_date)[:10])
+            except ValueError:
+                ann = None
+            if ann is None:
+                dropped.append({"description": e.description, "sig": sig, "a_share": a,
+                                "原因": "日期不可解析"})
+            elif not (d_start <= ann <= d_end):
+                dropped.append({"description": e.description, "sig": sig, "a_share": a,
+                                "原因": f"日期越界（{e.announcement_date} 不在 {start}~{end}）"})
+            elif sig < 2:
                 dropped.append({"description": e.description, "sig": sig, "a_share": a,
                                 "原因": f"主题/噪音级（sig={sig}）"})
             elif a < 3:
@@ -256,27 +287,35 @@ class HistoricalEventMiner:
         lines = []
         for i, e in enumerate(kept):
             lines.append(
-                f"[{i}] {e.description} | sig={_clamp(e.significance, 1, 4)} "
+                f"[{i + 1}] {e.description} | sig={_clamp(e.significance, 1, 4)} "
                 f"a_share={_clamp(e.a_share_relevance, 1, 5)} "
                 f"surprise={_clamp(e.surprise_timing, 1, 5)}/{_clamp(e.surprise_magnitude, 1, 5)} "
                 f"impact={_clamp(e.impact_scale, 1, 5)} | "
                 f"维度={e.shock_dimension} | {e.rationale}"
             )
         user = (
-            f"候选事件列表（共 {len(kept)}）：\n" + "\n".join(lines)
+            f"候选事件列表（共 {len(kept)}，行号 1 起，selected 的 index 填行号）：\n" + "\n".join(lines)
             + f"\n\n请选 top {top_n} 个最值得复盘的。"
         )
         out: _EventSelectOut = self.reasoner.call(
             system=_SELECT_SYSTEM, user=user, output_model=_EventSelectOut,
         )
         selected: list[CandidateEvent] = []
+        seen_idx: set[int] = set()
         for s in out.selected:
-            if 0 <= s.index < len(kept):
-                selected.append(self._to_candidate(kept[s.index]))
+            idx = s.index - 1  # 展示行号 1-based → 列表 0-based
+            if 0 <= idx < len(kept) and idx not in seen_idx:
+                seen_idx.add(idx)
+                cand = self._to_candidate(kept[idx])
+                if cand is not None:
+                    selected.append(cand)
+            if len(selected) >= top_n:  # LLM 超选 → 截断
+                break
         rejected: list[dict] = []
         for r in out.rejected:
-            if 0 <= r.index < len(kept):
-                e = kept[r.index]
+            idx = r.index - 1
+            if 0 <= idx < len(kept):
+                e = kept[idx]
                 rejected.append({
                     "description": e.description, "sig": e.significance,
                     "a_share": e.a_share_relevance, "原因": r.reason,
@@ -284,8 +323,10 @@ class HistoricalEventMiner:
         return selected, rejected
 
     @staticmethod
-    def _to_candidate(e: _MinedEventOut) -> CandidateEvent:
+    def _to_candidate(e: _MinedEventOut) -> CandidateEvent | None:
         event = _build_event(e)
+        if event is None:
+            return None
         dedup_key = make_dedup_key(event.event_type, str(event.announcement_date), event.key_entities, description=event.description)
         return CandidateEvent(
             event=event,

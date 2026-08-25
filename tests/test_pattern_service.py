@@ -81,10 +81,42 @@ def test_find_similar_retrieves_pattern(tmp_path):
     _seed_replay(storage, "r1")
     svc = PatternService(storage, _FakeReasoner(), _FakeEmbedder())
     svc.extract_pattern("r1")
-    res = svc.find_similar("新的教培监管事件", top_k=3)
+    res, degraded = svc.find_similar("新的教培监管事件", top_k=3)
     assert len(res) == 1
     assert res[0][0].source_replay_id == "r1"
     assert res[0][1] > 0.99  # 与自身 embedding 完全一致 → cosine≈1
+    assert degraded is False
+
+
+# ---- Fix 5c: find_similar 降级标记 ----
+
+
+class _DeadEmbedder(Embedder):
+    def embed(self, text):
+        return None  # 模拟 embedding 失败（网络挂/后端不可用）
+
+
+def test_find_similar_degraded_when_embed_fails(tmp_path):
+    """embed 失败（query_vec None）→ 返回 (结构化结果, degraded=True)，调用方可明示降级。"""
+    storage = Storage(tmp_path / "t.db")
+    _seed_replay(storage, "r1")
+    PatternService(storage, _FakeReasoner(), _FakeEmbedder()).extract_pattern("r1")
+    svc = PatternService(storage, _FakeReasoner(), _DeadEmbedder())
+    results, degraded = svc.find_similar("新的教培监管事件", top_k=3)
+    assert degraded is True
+    assert len(results) == 1  # 结构化过滤结果仍返回（score=0）
+    assert results[0][0].source_replay_id == "r1"
+    assert results[0][1] == 0.0
+
+
+def test_find_similar_not_degraded_when_embed_ok(tmp_path):
+    """embed 正常 → degraded=False（区分"库空/真无匹配"与"检索不可用"）。"""
+    storage = Storage(tmp_path / "t.db")
+    _seed_replay(storage, "r1")
+    svc = PatternService(storage, _FakeReasoner(), _FakeEmbedder())
+    svc.extract_pattern("r1")
+    _, degraded = svc.find_similar("新的教培监管事件", top_k=3)
+    assert degraded is False
 
 
 def test_extract_unknown_replay_returns_none(tmp_path):

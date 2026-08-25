@@ -19,7 +19,9 @@ from datetime import date as date_cls
 from pathlib import Path
 
 import pandas as pd
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+from ._net import network_retry_predicate
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,8 @@ class ResolvedStock:
     board: str | None
     listing_date: date_cls | None
     industry: str | None = field(default=None)  # 交易所所属行业（仅深市，证监会分类，非申万）
+    # 局限：is_st/is_delisted 均为"当前状态"快照，无历史时点数据源——历史事件期的
+    # ST/退市状态判定按 delist_date 时点推，ST 帽摘戴史不可得（不修）
     is_st: bool = False
     is_delisted: bool = False
     delist_date: date_cls | None = None
@@ -70,25 +74,31 @@ def clean_name(s: str) -> str:
 
 
 class StockMaster:
-    """标的字典 + 反查。加载后 pickle 缓存（~4600 标的，小）。"""
+    """标的字典 + 反查。加载后 pickle 缓存（~4600 标的，小）。
+
+    空主数据守卫：全源失败/数据被截断（< _MIN_MASTER_SIZE）时 ensure_loaded 抛
+    RuntimeError 且不落盘——防止把空库永久缓存导致后续进程静默反查全 None。
+    """
+
+    _MIN_MASTER_SIZE = 1000  # A 股 ~5300 只（含北交所）；低于此视为源异常
 
     def __init__(self, cache_dir: str | Path = "cache/stockmaster") -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._loaded = False
-        # code -> dict(name, listing_date, market, industry)
+        # code -> dict(name, listing_date, market, industry)（在市 + 退市并入）
         self._master: dict[str, dict] = {}
         # name -> code（当前名 + 历史曾用名）
         self._name_index: dict[str, str] = {}
         # code -> list[曾用名]
         self._historical: dict[str, list[str]] = {}
-        # code -> delist_date
-        self._delisted: dict[str, date_cls] = {}
+        # code -> dict(name, delist_date)
+        self._delisted: dict[str, dict] = {}
 
     # ---- 加载 ----
 
     def _cache_path(self) -> Path:
-        key = hashlib.md5(b"stockmaster-v2").hexdigest()
+        key = hashlib.md5(b"stockmaster-v3").hexdigest()
         return self.cache_dir / f"{key}.pkl"
 
     def ensure_loaded(self) -> None:
@@ -99,12 +109,19 @@ class StockMaster:
             try:
                 with path.open("rb") as f:
                     data = pickle.load(f)
-                self._master, self._name_index, self._historical, self._delisted = data
-                self._loaded = True
-                return
+                if len(data[0]) >= self._MIN_MASTER_SIZE:  # 空/异常小缓存视为 miss
+                    self._master, self._name_index, self._historical, self._delisted = data
+                    self._loaded = True
+                    return
+                path.unlink(missing_ok=True)  # 删除坏缓存，走重新拉取
             except Exception:
                 path.unlink(missing_ok=True)
         self._fetch_and_build()
+        if len(self._master) < self._MIN_MASTER_SIZE:
+            raise RuntimeError(
+                f"StockMaster 主数据仅 {len(self._master)} 条（阈值 "
+                f"{self._MIN_MASTER_SIZE}），疑似数据源全部不可达——拒绝落盘空库"
+            )
         try:
             with path.open("wb") as f:
                 pickle.dump(
@@ -115,7 +132,7 @@ class StockMaster:
         self._loaded = True
 
     @retry(
-        retry=retry_if_exception_type(ConnectionError),
+        retry=retry_if_exception(network_retry_predicate),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
@@ -145,9 +162,10 @@ class StockMaster:
         try:
             sz = self._fetch_df("stock_info_sz_name_code")
             for _, r in sz.iterrows():
-                code = str(r["A股代码"]).zfill(6) if pd.notna(r.get("A股代码")) else None
-                if not code:
-                    continue
+                code = str(r["A股代码"]).strip() if pd.notna(r.get("A股代码")) else ""
+                if not code or not code.isdigit():
+                    continue  # 空串/非数字（NaN/占位行）不产生 "000000" 假代码
+                code = code.zfill(6)
                 self._master[code] = {
                     "name": str(r["A股简称"]),
                     "listing_date": self._parse_date(r.get("A股上市日期")),
@@ -168,18 +186,32 @@ class StockMaster:
                     self._historical.setdefault(code, []).append(prev)
         except Exception:
             pass
-        # 退市
-        for fn, code_col, date_col in [
-            ("stock_info_sh_delist", "公司代码", "暂停上市日期"),
-            ("stock_info_sz_delist", "证券代码", "终止上市日期"),
+        # 退市（并入可 resolve 索引：否则历史事件复盘对退市标的全 None——幸存者偏差）
+        for fn, code_col, date_col, market in [
+            ("stock_info_sh_delist", "公司代码", "暂停上市日期", "沪"),
+            ("stock_info_sz_delist", "证券代码", "终止上市日期", "深"),
         ]:
             try:
                 df = self._fetch_df(fn) if fn == "stock_info_sh_delist" else self._fetch_df(fn, "终止上市公司")
                 for _, r in df.iterrows():
-                    code = str(r[code_col]).zfill(6)
-                    d = self._parse_date(r.get(date_col))
-                    if d is not None:
-                        self._delisted[code] = d
+                    code = str(r[code_col]).strip()
+                    if not code or not code.isdigit():
+                        continue
+                    code = code.zfill(6)
+                    name = str(r.get("公司简称") or r.get("证券简称") or "").strip()
+                    self._delisted[code] = {
+                        "name": name or None,
+                        "delist_date": self._parse_date(r.get(date_col)),
+                    }
+                    if code not in self._master:  # 退市接口自带上市日期，可补 listing
+                        self._master[code] = {
+                            "name": name or code,
+                            "listing_date": self._parse_date(r.get("上市日期")),
+                            "market": market,
+                            "industry": None,
+                        }
+                        if name:
+                            self._name_index.setdefault(name, code)
             except Exception:
                 pass
 
@@ -221,7 +253,7 @@ class StockMaster:
             industry=info["industry"],
             is_st="ST" in info["name"],
             is_delisted=code in self._delisted,
-            delist_date=self._delisted.get(code),
+            delist_date=(self._delisted.get(code) or {}).get("delist_date"),
             historical_names=tuple(self._historical.get(code, [])),
         )
 

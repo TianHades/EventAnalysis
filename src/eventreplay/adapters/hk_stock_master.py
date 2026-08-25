@@ -1,7 +1,12 @@
 """HKStockMaster：港股标的主数据 + 反查（Phase 5）。
 
-spike 确认：stock_hk_spot（2787只，代码/中英文名）+ stock_hk_company_profile_em（公司资料/行业/上市日，懒加载）。
-港股 spot 行业字段常空，行业/上市日从 company_profile_em 懒加载 + 缓存。
+spike 确认：stock_hk_spot（~2700只，代码/中英文名）+ 东财 F10 懒加载。
+列名对齐 akshare 1.18 源码（stock_profile_em.py）：
+- 公司资料 stock_hk_company_profile_em：所属行业 / 公司介绍（ORG_PROFILE）。
+  注意：该接口无上市日期列（也无"公司概况"列）。
+- 证券资料 stock_hk_security_profile_em：上市日期（LISTING_DATE）→ listing_date 来源；
+  该接口失败时 listing_date 置 None，在市判定退化为 resolve 校验（不判上市前）。
+港股 spot 行业字段常空，行业/上市日懒加载 + 缓存。
 """
 
 from __future__ import annotations
@@ -14,11 +19,12 @@ from pathlib import Path
 import pandas as pd
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
 
+from ._net import network_retry_predicate
 from .stock_master import ResolvedStock, clean_name
 
 
@@ -42,7 +48,13 @@ def _normalize_hk_code(s: str) -> str:
 
 
 class HKStockMaster:
-    """港股标的字典 + 反查。stock_hk_spot 加载 + company_profile_em 懒加载。"""
+    """港股标的字典 + 反查。stock_hk_spot 加载 + F10 profile 懒加载。
+
+    空主数据守卫：spot 失败/被截断（< _MIN_MASTER_SIZE）时 ensure_loaded 抛
+    RuntimeError 且不落盘；resolve 捕获返回 None（永不抛契约）。
+    """
+
+    _MIN_MASTER_SIZE = 500  # 港股 ~2700 只；低于此视为源异常
 
     def __init__(self, cache_dir: str | Path = "cache/stockmaster_hk") -> None:
         self.cache_dir = Path(cache_dir)
@@ -53,7 +65,7 @@ class HKStockMaster:
         self._profile_cache: dict[str, dict] = {}  # code -> profile（行业/上市日）
 
     def _cache_path(self) -> Path:
-        return self.cache_dir / f"{hashlib.md5(b'hk-stockmaster-v1').hexdigest()}.pkl"
+        return self.cache_dir / f"{hashlib.md5(b'hk-stockmaster-v2').hexdigest()}.pkl"
 
     def ensure_loaded(self) -> None:
         if self._loaded:
@@ -62,12 +74,20 @@ class HKStockMaster:
         if path.exists():
             try:
                 with path.open("rb") as f:
-                    self._master, self._name_index = pickle.load(f)
-                self._loaded = True
-                return
+                    data = pickle.load(f)
+                if len(data[0]) >= self._MIN_MASTER_SIZE:  # 空/异常小缓存视为 miss
+                    self._master, self._name_index = data
+                    self._loaded = True
+                    return
+                path.unlink(missing_ok=True)  # 删除坏缓存，走重新拉取
             except Exception:
                 path.unlink(missing_ok=True)
-        self._fetch_and_build()
+        self._fetch_and_build()  # spot 失败自然抛（重试 3 次后 reraise）
+        if len(self._master) < self._MIN_MASTER_SIZE:
+            raise RuntimeError(
+                f"HKStockMaster 主数据仅 {len(self._master)} 条（阈值 "
+                f"{self._MIN_MASTER_SIZE}），疑似数据源不可达——拒绝落盘空库"
+            )
         try:
             with path.open("wb") as f:
                 pickle.dump((self._master, self._name_index), f)
@@ -76,7 +96,7 @@ class HKStockMaster:
         self._loaded = True
 
     @retry(
-        retry=retry_if_exception_type(ConnectionError),
+        retry=retry_if_exception(network_retry_predicate),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
@@ -101,7 +121,7 @@ class HKStockMaster:
                 self._name_index.setdefault(name_en.upper(), code)
 
     @retry(
-        retry=retry_if_exception_type(ConnectionError),
+        retry=retry_if_exception(network_retry_predicate),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
@@ -109,15 +129,23 @@ class HKStockMaster:
     def _fetch_profile(self, code: str) -> dict:
         import akshare as ak
 
+        # 公司资料：行业 + 公司介绍（真实列；无上市日期列）
         df = ak.stock_hk_company_profile_em(symbol=code)
-        if df.empty:
-            return {}
-        r = df.iloc[0]
-        return {
-            "industry": str(r.get("所属行业") or "").strip() or None,
-            "listing_date": self._parse_date(r.get("公司上市日期")),
-            "summary": str(r.get("公司概况") or "").strip(),
-        }
+        industry: str | None = None
+        summary: str | None = None
+        if not df.empty:
+            r = df.iloc[0]
+            industry = str(r.get("所属行业") or "").strip() or None
+            summary = str(r.get("公司介绍") or "").strip() or None
+        # 证券资料：上市日期（东财 profile 无上市日，从此接口补）
+        listing_date: date_cls | None = None
+        try:
+            sec = ak.stock_hk_security_profile_em(symbol=code)
+            if not sec.empty:
+                listing_date = self._parse_date(sec.iloc[0].get("上市日期"))
+        except Exception:
+            pass  # 单接口失败 → listing_date None，在市判定退化为 resolve 校验
+        return {"industry": industry, "listing_date": listing_date, "summary": summary}
 
     @staticmethod
     def _parse_date(v) -> date_cls | None:
@@ -129,7 +157,7 @@ class HKStockMaster:
             return None
 
     def _get_profile(self, code: str) -> dict:
-        """懒加载 company_profile_em + 内存缓存。"""
+        """懒加载 F10 profile + 内存缓存。"""
         if code in self._profile_cache:
             return self._profile_cache[code]
         try:
@@ -140,8 +168,14 @@ class HKStockMaster:
         return p
 
     def resolve(self, identifier: str) -> ResolvedStock | None:
-        """反查：5位代码或中英文名 → ResolvedStock（港股）。永不抛异常。"""
-        self.ensure_loaded()
+        """反查：5位代码或中英文名 → ResolvedStock（港股）。永不抛异常。
+
+        ensure_loaded 失败（首次加载网络断）→ 返回 None，不炸整条 replay。
+        """
+        try:
+            self.ensure_loaded()
+        except Exception:
+            return None
         ident = identifier.strip()
         if not ident:
             return None
@@ -168,7 +202,10 @@ class HKStockMaster:
         )
 
     def is_real_at(self, code: str, on_date: date_cls) -> bool:
-        """事件期是否在市：真实标的 + 上市早于 on_date（港股无退市字段，MVP 不判退市）。"""
+        """事件期是否在市：真实标的 + 上市早于 on_date（港股无退市字段，MVP 不判退市）。
+
+        listing_date 缺失（证券资料接口失败）时退化为仅 resolve 校验。
+        """
         r = self.resolve(code)
         if r is None:
             return False

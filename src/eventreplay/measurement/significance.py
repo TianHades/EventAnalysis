@@ -39,26 +39,18 @@ def economic_significant(car_0_20: float, board: Board | str | None, *, n: int) 
     return abs(car_0_20) >= economic_threshold(board)
 
 
-def _standardized_ar(
-    ar_evt: np.ndarray,
-    bench_evt: np.ndarray,
-    est_bench: np.ndarray,
-    sigma: float,
-) -> np.ndarray:
-    """Patell forecast-error-adjusted 标准化 AR（事件窗）。
+def _mean_cross_corr(sar: np.ndarray) -> float:
+    """sar 行间平均两两截面相关 rbar（KP 截面相关修正的输入）。
 
-    s_i,t = σ · sqrt(1 + 1/L_est + (R_m,t − R̄_m)² / Σ(R_m − R̄_m)²)
+    corrcoef 对零方差行产出 NaN → np.nan_to_num 钳位为 0，避免 NaN 传播到 Z/p。
+    rbar 钳位到 [-0.5, 0.99] 防止修正因子 √(1+(L−1)r̄) 非正/爆炸。
     """
-    if sigma <= 0:
-        return ar_evt.copy()
-    L_est = len(est_bench)
-    Rm_bar = est_bench.mean()
-    denom = float(((est_bench - Rm_bar) ** 2).sum())
-    if denom <= 0:
-        adj = np.sqrt(1 + 1 / L_est)
-    else:
-        adj = np.sqrt(1 + 1 / L_est + (bench_evt - Rm_bar) ** 2 / denom)
-    return ar_evt / (sigma * adj)
+    N, L = sar.shape
+    if N < 2 or L < 2:
+        return 0.0
+    corr = np.nan_to_num(np.corrcoef(sar))
+    rbar = float((corr.sum() - N) / (N * (N - 1)))
+    return max(min(rbar, 0.99), -0.5)
 
 
 def adjusted_bmp(sar: np.ndarray) -> tuple[float, float, float]:
@@ -75,12 +67,7 @@ def adjusted_bmp(sar: np.ndarray) -> tuple[float, float, float]:
     V = np.where(V > 1e-12, V, 1.0)
     bmp_i = cum / (np.sqrt(L) * V)
     Z_bmp = float(bmp_i.mean() * np.sqrt(N)) if N > 0 else float("nan")
-    if N >= 2 and L > 1:
-        corr = np.corrcoef(sar)
-        rbar = float((corr.sum() - N) / (N * (N - 1)))
-        rbar = max(min(rbar, 0.99), -0.5)
-    else:
-        rbar = 0.0
+    rbar = _mean_cross_corr(sar)
     Z_adj = Z_bmp / math.sqrt(max(1 + (L - 1) * rbar, 1e-9))
     p = float(2 * (1 - norm.cdf(abs(Z_adj))))
     return Z_adj, p, rbar
@@ -90,6 +77,9 @@ def generalized_rank_z(sar: np.ndarray) -> tuple[float, float]:
     """广义秩检验（Van der Waerden 正态分；作为 KP(2011) GRANK 的 MVP 实现）。
 
     sar: (N, L)。对 |SAR| 池化秩 → 正态分 q；按 sign(SAR) 加和。
+    截面相关修正（KP(2011) 核心）：Z 除以 √(1+(L−1)r̄)，其中 rbar 为 sar 行间
+    平均两两相关（与 adjusted_bmp 同口径）。注意 rbar 用事件窗 SAR 矩阵估计——
+    事件窗含信号会高估 rbar（修正偏保守）；理想口径应来自估计窗 SAR，MVP 从简。
     返回 (Z, p_value)。需以 size 检验校准（spec §9）。
     """
     N, L = sar.shape
@@ -103,11 +93,14 @@ def generalized_rank_z(sar: np.ndarray) -> tuple[float, float]:
     q = norm.ppf(ranks / (M + 1))
     signs = np.sign(sar.flatten())
     signed = signs * q
-    # 池化 Z：sum(signed) / sqrt(sum(q^2))，~N(0,1) under H0
+    # 池化 Z：sum(signed) / sqrt(sum(q^2))，~N(0,1) under H0（截面独立时）
     denom = math.sqrt(float((q**2).sum()))
     if denom <= 0:
         return 0.0, 1.0
     Z = float(signed.sum() / denom)
+    # 截面相关修正：未修正的 Z 在共同因子下假显著（MC ρ=0.3 时拒绝率 ~0.4 vs 名义 0.05）
+    rbar = _mean_cross_corr(sar)
+    Z = Z / math.sqrt(max(1 + (L - 1) * rbar, 1e-9))
     p = float(2 * (1 - norm.cdf(abs(Z))))
     return Z, p
 

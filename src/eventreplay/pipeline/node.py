@@ -7,9 +7,14 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import sys
 from abc import ABC, abstractmethod
 from typing import Any
+
+# 哨兵：缓存 payload 重建（output_type 校验）失败 → 视为缓存 miss，走重算路径。
+# 不能用 None（None 是合法的 miss 语义），用模块级唯一 object 区分"坏缓存"。
+_CACHE_MISS = object()
 
 
 def _hash_json(obj: Any) -> str:
@@ -86,8 +91,10 @@ class Node(ABC):
             payload = self.storage.get_cached_node(key)
             if payload is not None:
                 output = self._from_jsonable(payload)
-                self._mem[key] = output
-                return output
+                if output is not _CACHE_MISS:
+                    self._mem[key] = output
+                    return output
+                # 重建失败（schema 演进/坏缓存）视为 miss：走重算并覆盖写入（自愈）
         output = self.run(inputs)
         self._mem[key] = output
         if self.storage is not None:
@@ -106,22 +113,33 @@ class Node(ABC):
 
     @staticmethod
     def _to_jsonable(output: Any) -> Any:
-        if output is None or isinstance(output, (str, int, float, bool)):
+        """输出 → 可标准 JSON 序列化的 payload；float NaN/inf 递归转 None。
+
+        NaN/Inf 字面量非标准 JSON（json.loads 能吃但跨语言消费方/严格解析器会炸），
+        model_dump 路径同样产出 NaN 字面量，故 dump 后再递归清洗一遍。
+        """
+        if output is None or isinstance(output, (str, int, bool)):
             return output
+        if isinstance(output, float):
+            return None if (math.isnan(output) or math.isinf(output)) else output
         if isinstance(output, dict):
             return {k: Node._to_jsonable(v) for k, v in output.items()}
         if isinstance(output, (list, tuple)):
             return [Node._to_jsonable(o) for o in output]
         if hasattr(output, "model_dump"):
-            return output.model_dump(mode="json")
+            return Node._to_jsonable(output.model_dump(mode="json"))
         return str(output)
 
     def _from_jsonable(self, payload: Any) -> Any:
-        """从 JSON payload 重建输出（声明 output_type 时按类型重建，否则原样返回）。"""
+        """从 JSON payload 重建输出（声明 output_type 时按类型重建，否则原样返回）。
+
+        重建失败返回 _CACHE_MISS 哨兵（run_cached 据此走重算覆盖，而非静默
+        降级成 dict 让下游节点拿到错误类型）。
+        """
         if self.output_type is None:
             return payload
         try:
             from pydantic import TypeAdapter
             return TypeAdapter(self.output_type).validate_python(payload)
         except Exception:
-            return payload
+            return _CACHE_MISS

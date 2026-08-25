@@ -102,7 +102,8 @@ def test_read_candidates(tmp_path):
     }]
     p = tmp_path / "cands.json"
     p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    cands = read_candidates(p)
+    cands, invalid = read_candidates(p)
+    assert invalid == 0
     assert len(cands) == 1
     assert cands[0].event.description == "芯片管制升级"
     assert cands[0].event.shock_dimension.value == "政策"
@@ -110,3 +111,26 @@ def test_read_candidates(tmp_path):
     assert cands[0].significance == 3
     assert cands[0].dedup_key == "dk1hashhash"
     assert cands[0].industries == ["电子"]
+
+
+# ---- Fix 7: 缺/非法日期不回退今天 ----
+
+
+def test_read_candidates_skips_missing_or_bad_date(tmp_path):
+    """缺日期/非法日期的候选直接跳过并打印原因（计入 invalid），绝不 date.today()。"""
+    data = [
+        {"dedup_key": "ok1", "description": "有日期", "announcement_date": "2023-10-07"},
+        {"dedup_key": "bad1", "description": "缺日期"},
+        {"dedup_key": "bad2", "description": "非法日期", "announcement_date": "2023-13-45"},
+        {"dedup_key": "bad3", "description": "乱写日期", "announcement_date": "去年夏天"},
+        {"dedup_key": "bad4", "description": "空日期", "announcement_date": ""},
+    ]
+    p = tmp_path / "cands.json"
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    msgs: list[str] = []
+    cands, invalid = read_candidates(p, echo=msgs.append)
+    assert [c.dedup_key for c in cands] == ["ok1"]
+    assert invalid == 4
+    assert any("bad1" in m or "缺" in m for m in msgs), msgs
+    assert any("bad2" in m or "bad3" in m for m in msgs)
+    assert cands[0].event.announcement_date == date(2023, 10, 7)

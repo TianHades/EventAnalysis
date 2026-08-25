@@ -30,6 +30,19 @@ def test_make_dedup_key_stable_and_order_independent():
     assert k1 != k4
 
 
+# ---- Fix 6: 去重键不截断 ----
+
+
+def test_make_dedup_key_no_truncation_merge():
+    """前 100 字相同、结论相反的长描述 → 不同 key（旧实现 [:100] 截断会误合并）。"""
+    prefix = "甲" * 120  # 规范化后前 100 字完全相同
+    k_bull = make_dedup_key("政策", "2024-01-01", [], prefix + "结论：利好国产替代链")
+    k_bear = make_dedup_key("政策", "2024-01-01", [], prefix + "结论：利空出口依赖链")
+    assert k_bull != k_bear
+    # 同文仍然稳定
+    assert k_bull == make_dedup_key("政策", "2024-01-01", [], prefix + "结论：利好国产替代链")
+
+
 def test_filter_new_then_mark_seen(tmp_path):
     """未见 → 全返回；mark_seen 后 → 全过滤。"""
     s = Storage(tmp_path / "t.db")

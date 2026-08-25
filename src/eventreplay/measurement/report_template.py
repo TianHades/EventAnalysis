@@ -82,7 +82,13 @@ def render_report(
     lines.append("")
 
     # 3 标的表（受益/受损主表 + 方向冲突子表）
-    meas_by_id = {m.stock_id: m for m in measurements}
+    # 多 episode 同标的：取 |car_0_20| 最大的度量为代表（与 impact 排序/attribution
+    # 首见去重同口径——原来 dict 后写覆盖是"末个 episode 胜"，口径互相矛盾）
+    meas_by_id: dict = {}
+    for m in measurements:
+        cur = meas_by_id.get(m.stock_id)
+        if cur is None or abs(m.car_0_20 or 0.0) > abs(cur.car_0_20 or 0.0):
+            meas_by_id[m.stock_id] = m
     lines.append("## 3 受益/受损标的（按 |CAR[0,+90]| 排序）\n")
 
     _HEADER = "| 代码 | 名称 | 行业 | CAR(市场)+20 | +60 | +90 | CAR(行业)+20 | +60 | +90 | 持续性比 | 分级 | 核心逻辑 |"
@@ -132,9 +138,14 @@ def render_report(
     for key in ("beneficiary", "victim"):
         stat = attribution.pool_stats.get(key)  # type: ignore[arg-type]
         if stat and stat.disclosed:
+            fb = (
+                f"，另有 {stat.fallback_n} 只弱反应 fallback 仅列示未计入"
+                if getattr(stat, "fallback_n", 0)
+                else ""
+            )
             lines.append(
                 f"- {key}: N={stat.n}, CAAR={stat.caar:+.2%}, "
-                f"t={stat.grank_z:.2f}(p={stat.grank_p:.3f}) [简化t检验]"
+                f"t={stat.grank_z:.2f}(p={stat.grank_p:.3f}) [简化t检验]{fb}"
             )
     lines.append("")
 
@@ -143,12 +154,12 @@ def render_report(
     lines.append("")
     lines.append("| CAR(市场) | CAR(行业) | 含义 |")
     lines.append("|---|---|---|")
-    lines.append("| >0 且 >0，差值≤10pct | 个股独立 α 强（跑赢市场且跑赢 peers）|")
-    lines.append("| >0 且 ≈0 | 搭板块便车（跟 peers 持平，上涨来自板块）|")
-    lines.append("| >0 且 <0 | 板块涨了但个股跑输 peers（落后标的）|")
-    lines.append("| <0 且 |CAR行业|>|CAR市场| | peer 池极端落后标的（**禁止解读为抗跌**）|")
-    lines.append("| <0 且 ≈0 | 随板块下跌 |")
-    lines.append("| CAR(行业)=0 | 无可比 peer 池（行业超额不可比）|")
+    lines.append("| >0 | >0（差值≤10pct）| 个股独立 α 强（跑赢市场且跑赢 peers）|")
+    lines.append("| >0 | ≈0 | 搭板块便车（跟 peers 持平，上涨来自板块）|")
+    lines.append("| >0 | <0 | 板块涨了但个股跑输 peers（落后标的）|")
+    lines.append("| <0 | \\|CAR行业\\|>\\|CAR市场\\| | peer 池极端落后标的（**禁止解读为抗跌**）|")
+    lines.append("| <0 | ≈0 | 随板块下跌 |")
+    lines.append("| 任意 | =0 | 无可比 peer 池（行业超额不可比）|")
     lines.append("")
 
     # 6 局限
@@ -157,9 +168,15 @@ def render_report(
         lines.append("- 报告由 Python 模板生成（LLM 报告节点超时兜底）；无 LLM 归纳叙述")
     else:
         lines.append("- ## 1 摘要 + ## 4 判读由 LLM 生成，其余由结构化模板渲染")
-    lines.append("- CAR(市场) 基准为沪深300价格指数（含 β/分红偏差）；CAR(行业) = 同 L1 行业候选池均值调整（peer-adjusted）")
+    lines.append("- CAR(市场) 基准为沪深300价格指数（含 β/分红偏差）；CAR(行业) = 行业指数市场模型（R_stock = α+β·R_ind 估计窗拟合）残差累计")
+    lines.append("- ST 状态按当前名单判定，历史 ST 戴/摘帽期涨跌停天数可能失真")
     lines.append("- 行业标签为申万三级（L3），部分标的 L3 未命中时降级为 L1")
     lines.append("- 组合统计量 = 横截面 CAR[0,+20] 简化 t 检验（未做聚集调整、横截面相关修正）")
     lines.append(f"- 度量标的 {len(measurements)} 只；CAR[0,+90] 窗口约 4.5 个月，可能混入其他事件")
     lines.append("- 方向冲突标的（⚠️）= 候选方向与实际 CAR 符号相反，解读以市场实际定价为准")
+    peaks = [m.peak_ar for m in measurements if m.peak_ar is not None]
+    troughs = [m.trough_ar for m in measurements if m.trough_ar is not None]
+    if troughs:  # 有谷值数据时峰值/谷值都展示（受损标的看谷值）
+        p_txt = f"{max(peaks):+.1%}" if peaks else "-"
+        lines.append(f"- 事件窗 AR 峰值/谷值（全池极值）：峰值最高 {p_txt}，谷值最低 {min(troughs):+.1%}")
     return "\n".join(lines)

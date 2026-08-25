@@ -6,13 +6,13 @@ from pathlib import Path
 
 from ..adapters.quote_adapter import AkshareQuoteAdapter
 from ..adapters.stock_master import StockMaster
-from ..adapters.tushare_source import TushareSource
 from ..llm import Reasoner
 from ..pipeline.nodes.calibration import InitialCalibrationNode
 from ..pipeline.nodes.forward_mapping import ForwardMappingNode
 from ..pipeline.nodes.ingest import EventIngestNode
 from ..pipeline.nodes.chain import IndustryChainNode
 from ..pipeline.nodes.candidate import CandidateNode
+from ..pipeline.orchestrator import make_recall_sources
 from ..pipeline.pattern_service import PatternService
 from ..schema import ForwardPrediction, ForwardResult, StockDirection
 from ..storage import Storage
@@ -20,6 +20,16 @@ from ..storage import Storage
 # 降级阈值（cosine similarity）：实测同类 0.74-0.81，无关 0.35-0.40
 STRONG_THRESHOLD = 0.6
 WEAK_THRESHOLD = 0.45  # 0.3 偏低（无关事件 0.35-0.40 误进 weak）→ 0.45
+
+# 校准状态中文标签（schema/forward.py 的 6 值 Literal；裸英文直出报告不可读）
+_CALIBRATION_LABELS = {
+    "confirming": "吻合",
+    "diverging": "背离",
+    "neutral": "中性",
+    "pending": "数据窗不足",
+    "no_range": "无预期区间",
+    "parse_error": "区间不可解析",
+}
 
 
 class ForwardOrchestrator:
@@ -48,12 +58,7 @@ class ForwardOrchestrator:
         # 复用 Phase 1 节点
         self.ingest = EventIngestNode(reasoner, storage)
         self.chain = IndustryChainNode(reasoner, storage)
-        sources = []
-        ts = TushareSource()
-        sources.append(ts)
-        from ..adapters.theme_index import ThemeIndex
-
-        sources.append(ThemeIndex())
+        self._ts, sources = make_recall_sources()
         self.cand = CandidateNode(reasoner, stock_master, storage, sources)
 
         # Phase 3 新增节点
@@ -81,15 +86,15 @@ class ForwardOrchestrator:
         })
         event = event.model_copy(update={"market": self.market})  # 多市场标记（Phase 5）
 
-        # 2. FindSimilar (复用 Phase 2)
-        results = self.ps.find_similar(
+        # 2. FindSimilar (复用 Phase 2)；degraded=embed 失败 → 检索不可用（纯结构化）
+        results, retrieval_degraded = self.ps.find_similar(
             event.description, top_k=top_k,
             shock_dimension=event.shock_dimension, impact_direction=event.impact_direction,
         )
         patterns = [p for p, _ in results]
         scores = [s for _, s in results]
 
-        # 3. 判断降级层
+        # 3. 判断降级层（检索不可用时分数全为 0，自然落入 qualitative，但语义不同）
         max_score = scores[0] if scores else 0.0
         if max_score > STRONG_THRESHOLD:
             level = "strong"
@@ -116,8 +121,8 @@ class ForwardOrchestrator:
             result.matched_scores = scores
             result.matched_patterns = patterns
 
-        # 5. 报告
-        markdown = self._generate_report(result)
+        # 5. 报告（retrieval_degraded 用于区分"库空/真无匹配/检索不可用"三态）
+        markdown = self._generate_report(result, retrieval_degraded=retrieval_degraded)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         from ..measurement.report_template import report_filename
         path = self.reports_dir / f"{report_filename(description, date_str)}.md"
@@ -199,25 +204,45 @@ class ForwardOrchestrator:
             chain_nodes=chain_nodes,
         )
 
-    def _generate_report(self, result: ForwardResult) -> str:
-        """生成前瞻报告 markdown（确定性 Python 模板，非 LLM）。"""
+    def _pattern_lib_empty(self) -> bool:
+        """规律库是否为空（区分"库空"与"有库无匹配"；无法判定时保守返回 False）。"""
+        st = getattr(self.ps, "storage", None) or self.storage
+        if st is None:
+            return False
+        try:
+            return len(st.list_patterns()) == 0
+        except Exception:
+            return False
+
+    def _generate_report(self, result: ForwardResult, retrieval_degraded: bool = False) -> str:
+        """生成前瞻报告 markdown（确定性 Python 模板，非 LLM）。
+
+        retrieval_degraded=True（embed 失败）时明示"向量检索不可用"，
+        不得谎称"无历史 Pattern 类比"。
+        """
         lines: list[str] = []
-        title = result.event.description[:40]
+        title = (result.event.description or "—")[:40]
         lines.append(f"# {title} 前瞻预判报告\n")
 
         level_label = {"strong": "强 Pattern 指导", "weak": "弱 Pattern 参考", "qualitative": "纯定性推理"}
-        lines.append(f"> 模式：{'盘前前瞻' if result.mode == 'pre' else '盘后校准'} | {level_label.get(result.degradation_level, '?')} | 置信度：{result.confidence}\n")
+        # mode 二分：仅 post 显示"盘后校准"、pre 显示"盘前前瞻"，其它原样展示
+        mode_label = {"pre": "盘前前瞻", "post": "盘后校准"}.get(result.mode, result.mode)
+        lines.append(f"> 模式：{mode_label} | {level_label.get(result.degradation_level, '?')} | 置信度：{result.confidence or '—'}\n")
+
+        # 检索不可用 banner（必须在定性结论之前，避免被误读为已比对历史）
+        if retrieval_degraded:
+            lines.append("> ⚠️ **向量检索不可用，结论为纯定性推理**（本次未与历史 Pattern 库比对，不代表\"无历史类比\"）\n")
 
         # forward_mapping 失败显著提示
         if result.mapping_errors:
             lines.append("> ⚠️ **forward_mapping 推理失败**：" + "；".join(result.mapping_errors))
             lines.append("> 预判结果可能不完整，失败方向的标的表为空。建议重跑或换 haiku 模型。\n")
 
-        # 1 事件摘要
+        # 1 事件摘要（字段 Optional 化后 None → '—'）
         lines.append("## 1 事件摘要")
-        lines.append(f"- 描述：{result.event.description}")
-        lines.append(f"- 日期：{result.event.reaction_date}")
-        lines.append(f"- 类型：{result.event.event_type}")
+        lines.append(f"- 描述：{result.event.description or '—'}")
+        lines.append(f"- 日期：{result.event.reaction_date or '—'}")
+        lines.append(f"- 类型：{result.event.event_type or '—'}")
         lines.append("")
 
         # 2 相似 Pattern（含事件影响定性，供本次类比参考）
@@ -259,11 +284,11 @@ class ForwardOrchestrator:
             for p in preds:
                 exp20 = p.expected_car_0_20_range or "—"
                 exp60 = p.expected_car_0_60_range or "—"
-                rat = p.rationale[:50].replace("|", "/")
+                rat = (p.rationale or "—")[:50].replace("|", "/")
                 if result.mode == "post" and result.degradation_level == "strong":
                     a1 = f"{p.actual_car_0_1:+.1%}" if p.actual_car_0_1 is not None else "—"
                     a5 = f"{p.actual_car_0_5:+.1%}" if p.actual_car_0_5 is not None else "—"
-                    cal = p.calibration or "—"
+                    cal = _CALIBRATION_LABELS.get(p.calibration, p.calibration) if p.calibration else "—"
                     lines.append(
                         f"| {p.stock_id} | {p.stock_name or '—'} | {p.direction.value} | "
                         f"{exp20} | {exp60} | {a1} | {a5} | {cal} | {rat} |"
@@ -286,14 +311,18 @@ class ForwardOrchestrator:
             lines.append(result.key_risks)
             lines.append("")
 
-        # 6 局限
+        # 6 局限（三态：库空 / 真无匹配 / 检索不可用）
         lines.append("## 6 局限")
         lines.append("- **前瞻预判 ≠ 确定结论**：历史不一定重演；预期区间是参考非保证")
         lines.append(f"- 参考层级：{level_label.get(result.degradation_level, '?')}")
         if result.matched_pattern_ids:
             lines.append(f"- 基于历史 Pattern 样本：{len(result.matched_pattern_ids)} 个")
+        elif retrieval_degraded:
+            lines.append("- ⚠️ 向量检索不可用（embedding 失败）：本轮未与历史 Pattern 比对，不得据此声称\"无历史类比\"")
+        elif self._pattern_lib_empty():
+            lines.append("- 历史规律库为空：尚无可用 Pattern（先 replay + extract-pattern 建库）")
         else:
-            lines.append("- 无历史 Pattern 类比，纯定性推理")
+            lines.append("- 无相似历史 Pattern（相似度低于阈值），纯定性推理")
         if result.mode == "post":
             lines.append("- 盘后校准仅 [+1]/[+5] 初始信号，不等于最终验证")
 

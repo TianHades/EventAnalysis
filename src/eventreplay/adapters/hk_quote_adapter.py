@@ -19,11 +19,12 @@ from pathlib import Path
 import pandas as pd
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
 
+from ._net import call_with_timeout, network_retry_predicate
 
 
 def to_hk_symbol(code: str) -> str:
@@ -33,6 +34,8 @@ def to_hk_symbol(code: str) -> str:
         code = code[2:]
     if not code.isdigit():
         raise ValueError(f"非法港股代码: {code!r}")
+    if len(code) > 5:
+        raise ValueError(f"非法港股代码（超 5 位，疑似 A 股代码误传）: {code!r}")
     return code.zfill(5)
 
 
@@ -67,7 +70,7 @@ class HKQuoteAdapter:
             pass
 
     @retry(
-        retry=retry_if_exception_type(ConnectionError),
+        retry=retry_if_exception(network_retry_predicate),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
@@ -75,11 +78,11 @@ class HKQuoteAdapter:
     def _fetch_daily(self, symbol: str, adjust: str) -> pd.DataFrame:
         import akshare as ak
 
-        df = ak.stock_hk_daily(symbol=symbol, adjust=adjust)
+        df = call_with_timeout(ak.stock_hk_daily, {"symbol": symbol, "adjust": adjust})
         return self._normalize_daily(df)
 
     @retry(
-        retry=retry_if_exception_type(ConnectionError),
+        retry=retry_if_exception(network_retry_predicate),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
@@ -87,7 +90,7 @@ class HKQuoteAdapter:
     def _fetch_index(self, symbol: str) -> pd.DataFrame:
         import akshare as ak
 
-        df = ak.stock_hk_index_daily_sina(symbol=symbol)
+        df = call_with_timeout(ak.stock_hk_index_daily_sina, {"symbol": symbol})
         if "date" not in df.columns:
             raise KeyError("date")
         df["date"] = pd.to_datetime(df["date"]).dt.date
@@ -166,7 +169,7 @@ class HKQuoteAdapter:
         return result
 
     @retry(
-        retry=retry_if_exception_type(ConnectionError),
+        retry=retry_if_exception(network_retry_predicate),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
@@ -174,7 +177,7 @@ class HKQuoteAdapter:
     def _fetch_trade_dates(self) -> pd.DataFrame:
         import akshare as ak
 
-        df = ak.tool_trade_date_hist_sina()
+        df = call_with_timeout(ak.tool_trade_date_hist_sina, {})
         df = df.copy()
         df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
         return df

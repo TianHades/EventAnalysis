@@ -99,15 +99,46 @@ def test_dedup_key_differs_for_different_events():
     assert out1.dedup_key != out3.dedup_key
 
 
-def test_extract_invalid_date_falls_back_today():
-    """LLM 返回非法日期 → 兜底 today，不崩溃（与 historical_miner 一致）。"""
+def test_extract_invalid_date_falls_back_to_published_at():
+    """LLM 日期非法 → 回退 news.published_at.date()（真实来源），不虚构 today()。"""
     out = _event_out().model_copy(update={
-        "announcement_date": "非法日期", "reaction_date": "也非法",
+        "announcement_date": "非法日期", "reaction_date": None,
     })
     node = EventExtractor(FakeReasoner(out))
     cand = node.run({"news": _news()})
     assert cand is not None
-    assert cand.event.announcement_date == date.today()
+    assert cand.event.announcement_date == date(2026, 7, 1)  # 新闻发布日
+    assert cand.event.reaction_date == date(2026, 7, 1)
+
+
+def test_extract_invalid_date_dropped_without_published_at():
+    """LLM 日期非法且无新闻时间兜底 → 丢弃该事件（宁缺毋滥，return None）。"""
+    out = _event_out().model_copy(update={"announcement_date": "非法日期"})
+    assert EventExtractor._build_event(out, None) is None
+
+
+def test_extract_after_close_reaction_next_day():
+    """盘后公告 → reaction_date = announcement_date + 1 天（event_study t0 对齐推到下一交易日）。"""
+    out = _event_out().model_copy(update={
+        "announcement_time": "盘后", "reaction_date": None,
+    })
+    node = EventExtractor(FakeReasoner(out))
+    cand = node.run({"news": _news()})
+    assert cand is not None
+    assert cand.event.announcement_date == date(2026, 7, 1)
+    assert cand.event.reaction_date == date(2026, 7, 2)
+    assert cand.event.announcement_time.value == "盘后"
+
+
+def test_extract_explicit_reaction_date_wins_over_after_close():
+    """显式传入的 reaction_date 优先级高于盘后 +1 规则。"""
+    out = _event_out().model_copy(update={
+        "announcement_time": "盘后", "reaction_date": "2026-07-10",
+    })
+    node = EventExtractor(FakeReasoner(out))
+    cand = node.run({"news": _news()})
+    assert cand is not None
+    assert cand.event.reaction_date == date(2026, 7, 10)
 
 
 def test_extract_significance_clamped():

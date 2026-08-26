@@ -288,3 +288,125 @@ def test_monitor_loop_survives_run_once_exception(tmp_path):
         run_monitor_loop(FlakyPusher(), interval_min=0, echo=msgs.append, sleep=fake_sleep)
     assert calls["n"] >= 2, "首轮异常后循环必须继续"
     assert any("本轮执行异常" in m for m in msgs)
+
+
+# ---- 两级漏斗（初筛 + 并发细评）----
+
+
+class CountingExtractor:
+    """记录调用顺序的细评 fake：返回与 news id 关联的 cand 或 None。"""
+
+    def __init__(self, cands_by_news):
+        self.cands = cands_by_news
+        self.called: list[str] = []
+
+    def run(self, inputs):
+        nid = inputs["news"].id
+        self.called.append(nid)
+        return self.cands.get(nid)
+
+
+class FakeScreener:
+    """初筛 fake：返回配置的幸存子集（或抛错）。"""
+
+    def __init__(self, survivors=None, fail=False):
+        self.survivors = survivors
+        self.fail = fail
+        self.calls: list = []
+
+    def screen(self, items, echo=print):
+        self.calls.append(list(items))
+        if self.fail:
+            raise RuntimeError("初筛网关超时")
+        return self.survivors if self.survivors is not None else items
+
+
+def _pusher(tmp_path, extractor, screener=None, workers=1):
+    dedup = EventDedup(Storage(tmp_path / "t.db"))
+    return MonitoringPusher(
+        FakeNews([]), extractor, FakeForward(), dedup, [FakeChannel()],
+        screener=screener, extract_workers=workers,
+    )
+
+
+def test_funnel_screens_before_extraction(tmp_path):
+    """初筛幸存者才进入细评：5 条 → 初筛留 2 → extractor 只调 2 次。"""
+    news = FakeNews([_news(i) for i in range(1, 6)])
+    extractor = CountingExtractor({"n1": _cand("k1", sig=4, a_share=5), "n3": None})
+    screener = FakeScreener(survivors=[news.items[0], news.items[2]])
+    pusher = _pusher(tmp_path, extractor, screener)
+    pusher.news = news
+    pusher.run_once(echo=lambda s: None)
+    assert extractor.called == ["n1", "n3"]
+    assert len(screener.calls) == 1 and len(screener.calls[0]) == 5
+
+
+def test_funnel_screen_failure_falls_back_to_all(tmp_path):
+    """初筛失败 → 降级逐条细评（全部条目都评估，不引入新单点）。"""
+    news = FakeNews([_news(i) for i in range(1, 6)])
+    extractor = CountingExtractor({f"n{i}": None for i in range(1, 6)})
+    pusher = _pusher(tmp_path, extractor, FakeScreener(fail=True))
+    pusher.news = news
+    msgs: list[str] = []
+    pusher.run_once(echo=msgs.append)
+    assert extractor.called == [f"n{i}" for i in range(1, 6)]
+    assert any("初筛失败" in m for m in msgs)
+
+
+def test_funnel_disabled_or_small_batch_skips_screening(tmp_path):
+    """screen=False 或条数 < 4：跳过初筛直接逐条。"""
+    extractor = CountingExtractor({"n1": None})
+    screener = FakeScreener()
+    pusher = _pusher(tmp_path, extractor, screener)
+    pusher.news = FakeNews([_news(1)])
+    pusher.run_once(echo=lambda s: None)
+    assert screener.calls == [] and extractor.called == ["n1"]
+
+    extractor2 = CountingExtractor({f"n{i}": None for i in range(1, 5)})
+    screener2 = FakeScreener()
+    pusher2 = _pusher(tmp_path, extractor2, screener2)
+    pusher2.news = FakeNews([_news(i) for i in range(1, 5)])
+    pusher2.run_once(screen=False, echo=lambda s: None)
+    assert screener2.calls == [] and len(extractor2.called) == 4
+
+
+def test_title_dedup_runs_before_screening(tmp_path):
+    """同标题跨源重复在 LLM 之前免费去掉（初筛输入不含重复）。"""
+    dup1 = NewsItem(id="a1", title="央行降准 0.25%", content="x", source="jin10")
+    dup2 = NewsItem(id="a2", title="央行降准0.25%", content="x", source="cls")
+    others = [_news(i) for i in (3, 4, 5)]  # 补足 4 条阈值，确保初筛触发
+    extractor = CountingExtractor({"a1": None, "n3": None, "n4": None, "n5": None})
+    screener = FakeScreener()  # 全保留
+    pusher = _pusher(tmp_path, extractor, screener)
+    pusher.news = FakeNews([dup1, dup2, *others])
+    pusher.run_once(echo=lambda s: None)
+    assert [x.id for x in screener.calls[0]] == ["a1", "n3", "n4", "n5"], "重复标题不应进入初筛"
+
+
+def test_parallel_extraction_preserves_order(tmp_path):
+    """并发细评：完成顺序无关，输出按输入顺序（map 语义），全部条目都被调用。"""
+    import threading
+    import time as _t
+
+    class SlowExtractor:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.started: list[str] = []
+
+        def run(self, inputs):
+            nid = inputs["news"].id
+            with self.lock:
+                self.started.append(nid)
+            # n1 故意最慢：并发下完成序与输入序相反，但结果序必须保持输入序
+            _t.sleep({"n1": 0.3}.get(nid, 0.02))
+            return _cand(f"k-{nid}") if nid != "n3" else None
+
+    slow = SlowExtractor()
+    extractor = CountingExtractor.__new__(CountingExtractor)  # 不用计数版
+    pusher = _pusher(tmp_path, slow, workers=3)
+    pusher.news = FakeNews([_news(i) for i in range(1, 5)])
+    msgs: list[str] = []
+    # run_once 走完整链：4 条 → 无初筛（screener=None）→ 并发细评 → 无推送（阈值过滤 k-*）
+    pusher.run_once(echo=msgs.append)
+    assert slow.started[0] in ("n1", "n2", "n3")  # 已并发启动
+    assert any("共识别 3 个事件" in m for m in msgs)  # 4 条中 n3 非事件

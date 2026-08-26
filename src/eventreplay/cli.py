@@ -301,6 +301,7 @@ def monitor(
     impact: int = typer.Option(0, "--impact", help="影响规模阈值（≥，0=不过滤）"),
     source: str = typer.Option("multi", "--source", help="akshare/jiuyan/cctv/cls/jin10/multi"),
     model: str = typer.Option("haiku", "--model", help="Claude 模型别名（默认 haiku，forward_mapping sonnet 网关超时）"),
+    screen: bool = typer.Option(True, "--screen/--no-screen", help="两级漏斗：先批量初筛再细评（默认开，--no-screen 回到逐条细评）"),
     db: str = typer.Option(_DEFAULT_DB, "--db"),
 ) -> None:
     """Phase 4 功能1：定时监测新闻 → 高分事件 forward → 推送。"""
@@ -311,6 +312,7 @@ def monitor(
     from .pipeline.event_dedup import EventDedup
     from .pipeline.monitoring_pusher import MonitoringPusher, run_monitor_loop
     from .pipeline.nodes.event_extractor import EventExtractor
+    from .pipeline.nodes.news_screening import NewsScreeningNode
     from .pipeline.push_channel import FeishuChannel, FileChannel, WebhookChannel
 
     # 间隔解析移到命令体内：.env 写错值不至于让所有 CLI 命令在导入期崩溃
@@ -341,7 +343,10 @@ def monitor(
         channels.append(WebhookChannel(webhook))
     if feishu:
         channels.append(FeishuChannel(feishu))
-    pusher = MonitoringPusher(news, extractor, fwd_orch, dedup, channels)
+    pusher = MonitoringPusher(
+        news, extractor, fwd_orch, dedup, channels,
+        screener=NewsScreeningNode(reasoner),  # 两级漏斗第一级（screen=False 时不用）
+    )
     try:
         # 主循环体整体兜底：单轮任何异常 echo 后继续 sleep（监控的核心要求是持续运行）
         run_monitor_loop(
@@ -352,6 +357,7 @@ def monitor(
             a_share_min=a_share,
             surprise_min=surprise,
             impact_min=impact,
+            screen=screen,
         )
     except KeyboardInterrupt:
         typer.echo("[monitor] stopped")

@@ -1,4 +1,4 @@
-"""MonitoringPusher：采集 → 抽取 → 高分 forward → 推送（Phase 4 功能1）。"""
+"""MonitoringPusher：采集 → 初筛 → 抽取 → 高分 forward → 推送（Phase 4 功能1）。"""
 
 from __future__ import annotations
 
@@ -7,12 +7,16 @@ import time
 from typing import Callable
 
 from .event_dedup import EventDedup
+from .nodes.news_screening import dedup_by_title
 from .push_channel import PushChannel
 
 # 上下文闭环：识别但未达推送阈值的事件也记入 seen（purpose='identified'），
 # _build_recent_context 同时读 push + identified，供后续轮次 surprise 校准。
 _CONTEXT_PURPOSES = ("push", "identified")
 _IDENTIFIED_MIN_SIG = 2  # significance ≥ 2 的事件才值得进入上下文（1=噪音）
+
+# 两级漏斗：条数少于该值时跳过初筛（省不出一次调用，直接逐条细评）
+_SCREEN_MIN_ITEMS = 4
 
 
 def run_monitor_loop(
@@ -37,8 +41,10 @@ def run_monitor_loop(
 
 
 class MonitoringPusher:
-    """单次：fetch_latest → EventExtractor → 阈值/去重过滤 → forward → 推送。
+    """单次：fetch_latest → 初筛（可选）→ EventExtractor → 阈值/去重过滤 → forward → 推送。
 
+    两级漏斗：先一次批量 LLM 初筛砍掉明显非事件（~80% 调用花在噪音上），
+    幸存者再逐条细评；初筛失败自动降级为逐条细评（不引入新单点故障）。
     定时循环由 run_monitor_loop（CLI monitor 命令）用 while+sleep 驱动；本类只做单次 run_once。
     """
 
@@ -49,12 +55,16 @@ class MonitoringPusher:
         forward_orchestrator,
         dedup: EventDedup,
         channels: list[PushChannel],
+        screener=None,
+        extract_workers: int = 3,
     ) -> None:
         self.news = news_adapter
         self.extractor = event_extractor
         self.forward = forward_orchestrator
         self.dedup = dedup
         self.channels = channels
+        self.screener = screener  # NewsScreeningNode；None=无初筛（直接逐条）
+        self.extract_workers = extract_workers  # 细评并发数；1=串行
 
     def _build_recent_context(self, echo=print) -> str:
         """从 seen_events 表拉取最近识别/推送的事件，构建上下文摘要（校准 surprise 打分）。"""
@@ -76,9 +86,27 @@ class MonitoringPusher:
                 continue
         return "\n".join(lines[:8]) if lines else ""
 
-    def run_once(self, significance_min: int = 3, a_share_min: int = 4, surprise_min: float = 0, impact_min: int = 0, echo=print) -> int:
-        """单次采集→抽取→高分 forward→推送；返回推送数。
+    def _extract_one(self, item, recent_ctx: str, echo=print):
+        """单条细评；失败返回 None（不中断本轮其它条目）。"""
+        try:
+            return self.extractor.run({"news": item, "recent_context": recent_ctx})
+        except Exception as ex:
+            echo(f"[monitor] 抽取失败 {item.title[:30]}: {str(ex)[:60]}")
+            return None
 
+    def _extract_all(self, items: list, recent_ctx: str, echo=print) -> list:
+        """并发细评，按输入顺序返回 [cand | None]。细评相互独立（纯 LLM 调用）。"""
+        if self.extract_workers <= 1 or len(items) <= 1:
+            return [self._extract_one(it, recent_ctx, echo) for it in items]
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=self.extract_workers) as pool:
+            return list(pool.map(lambda it: self._extract_one(it, recent_ctx, echo), items))
+
+    def run_once(self, significance_min: int = 3, a_share_min: int = 4, surprise_min: float = 0, impact_min: int = 0, screen: bool = True, echo=print) -> int:
+        """单次采集→初筛→细评→高分 forward→推送；返回推送数。
+
+        screen：两级漏斗开关（True=先批量初筛再细评；False=逐条细评）。
         surprise_min：(surprise_timing+surprise_magnitude)/2 的下限，0=不过滤。
         impact_min：影响规模下限，0=不过滤。
 
@@ -89,7 +117,22 @@ class MonitoringPusher:
         except Exception as ex:
             echo(f"[monitor] 新闻采集失败: {type(ex).__name__}: {str(ex)[:120]}")
             return 0
+        raw_n = len(items)
+        items = dedup_by_title(items)
+        if len(items) < raw_n:
+            echo(f"[monitor] 标题去重 {raw_n}→{len(items)} 条")
         echo(f"[monitor] 采集 {len(items)} 条新闻")
+
+        # 两级漏斗第一级：批量初筛（宽松——只砍明显非事件，失败降级全保留）
+        if screen and self.screener is not None and len(items) >= _SCREEN_MIN_ITEMS:
+            try:
+                survivors = self.screener.screen(items, echo=echo)
+                echo(f"[monitor] 初筛 {len(items)}→{len(survivors)} 条")
+            except Exception as ex:
+                echo(f"[monitor] 初筛失败（降级逐条细评）: {type(ex).__name__}: {str(ex)[:60]}")
+                survivors = items
+        else:
+            survivors = items
 
         # 构建近期事件上下文（校准 surprise 打分）
         recent_ctx = self._build_recent_context(echo=echo)
@@ -99,14 +142,9 @@ class MonitoringPusher:
         pushed = 0
         # 记录本轮所有识别到的事件（供无触发时摘要 + 上下文累积）
         all_cands: list = []
-        for item in items:
-            try:
-                cand = self.extractor.run({"news": item, "recent_context": recent_ctx})
-            except Exception as ex:
-                echo(f"[monitor] 抽取失败 {item.title[:30]}: {str(ex)[:60]}")
-                continue
+        for cand in self._extract_all(survivors, recent_ctx, echo):
             if cand is None:
-                continue  # 非事件（噪音过滤）
+                continue  # 非事件（噪音过滤）或抽取失败
             all_cands.append(cand)
             if cand.significance >= _IDENTIFIED_MIN_SIG:
                 # 上下文闭环：识别到的事件（含未达推送阈值的）记入 identified，

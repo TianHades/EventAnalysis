@@ -115,15 +115,12 @@ class AkshareQuoteAdapter:
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
     )
-    def _fetch_daily(self, sina_sym: str, start: date, end: date, adjust: str) -> pd.DataFrame:
+    def _fetch_daily(self, sina_sym: str, adjust: str) -> pd.DataFrame:
+        """拉取全量历史（不传 start/end——akshare 收到日期参数会先全量拉取再按
+        窗口切片返回，若把切片当"全量"缓存，其它事件的窗口会被 mask 成空）。"""
         import akshare as ak
 
-        df = call_with_timeout(ak.stock_zh_a_daily, {
-            "symbol": sina_sym,
-            "start_date": start.strftime("%Y%m%d"),
-            "end_date": end.strftime("%Y%m%d"),
-            "adjust": adjust,
-        })
+        df = call_with_timeout(ak.stock_zh_a_daily, {"symbol": sina_sym, "adjust": adjust})
         return self._normalize_daily(df)
 
     @retry(
@@ -179,8 +176,11 @@ class AkshareQuoteAdapter:
             df = cached
         else:
             try:
-                df = self._fetch_daily(sina_sym, start, end, adjust)
-                self._write_cache(key, df)
+                df = self._fetch_daily(sina_sym, adjust)
+                if not df.empty:  # 空结果不落缓存（限流偶发空响应会毒化全量缓存）
+                    self._write_cache(key, df)
+                elif cached is not None:
+                    df = cached  # 拉到空且有旧缓存：退回旧缓存
             except Exception:
                 if cached is None:
                     raise
@@ -197,7 +197,10 @@ class AkshareQuoteAdapter:
         else:
             try:
                 df = self._fetch_index(symbol)
-                self._write_cache(key, df)
+                if not df.empty:
+                    self._write_cache(key, df)
+                elif cached is not None:
+                    df = cached
             except Exception:
                 if cached is None:
                     raise

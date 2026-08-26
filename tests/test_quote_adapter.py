@@ -57,9 +57,9 @@ def test_daily_adjusted_cache_hit_avoids_refetch(tmp_path, monkeypatch):
     adapter = AkshareQuoteAdapter(cache_dir=tmp_path)
     calls = {"n": 0}
 
-    def fake_fetch(self, sina_sym, start, end, adjust):
+    def fake_fetch(self, sina_sym, adjust):
         calls["n"] += 1
-        return _synthetic_daily(start, end)
+        return _synthetic_daily(date(2024, 1, 1), date(2024, 1, 31))  # 全量
 
     monkeypatch.setattr(AkshareQuoteAdapter, "_fetch_daily", fake_fetch)
 
@@ -68,20 +68,25 @@ def test_daily_adjusted_cache_hit_avoids_refetch(tmp_path, monkeypatch):
     df2 = adapter.daily_adjusted("600519", start, end)
     assert calls["n"] == 1, "第二次应命中缓存不再拉取"
     pd.testing.assert_frame_equal(df1, df2)
+    assert len(df1) == 4  # 全量被 [start,end] 过滤
     assert "outstanding_share" in df1.columns
 
 
 def test_daily_adjusted_cache_key_symbol_only(tmp_path, monkeypatch):
-    """缓存键只含 (symbol, adjust)：不同区间复用同一份全量缓存并按行过滤。
+    """缓存键只含 (symbol, adjust)：全量拉取一次，不同窗口按行过滤。
 
-    sina stock_zh_a_daily 无论区间都全量拉取；键含 (start,end) 会导致每个区间
-    重复全量抓取。
+    两个关键点（曾出过的回归）：
+    1. 拉取不得传 start/end 给数据源——akshare 收到日期会按窗口切片返回，
+       把切片当"全量"缓存后，其它事件的窗口会被 mask 成空（2746 行里 1134 行
+       度量因此归零）。
+    2. 不同窗口复用同一份缓存，只拉一次。
     """
     adapter = AkshareQuoteAdapter(cache_dir=tmp_path)
-    calls = {"n": 0}
+    calls = {"n": 0, "args": None}
 
-    def fake_fetch(self, sina_sym, start, end, adjust):
+    def fake_fetch(self, sina_sym, adjust):
         calls["n"] += 1
+        calls["args"] = (sina_sym, adjust)
         return _synthetic_daily(date(2024, 1, 1), date(2024, 3, 31))  # 全量
 
     monkeypatch.setattr(AkshareQuoteAdapter, "_fetch_daily", fake_fetch)
@@ -89,10 +94,32 @@ def test_daily_adjusted_cache_key_symbol_only(tmp_path, monkeypatch):
     df1 = adapter.daily_adjusted("600519", date(2024, 1, 2), date(2024, 1, 5))
     df2 = adapter.daily_adjusted("600519", date(2024, 2, 1), date(2024, 2, 15))
     assert calls["n"] == 1, "不同区间不应重复全量抓取"
+    assert calls["args"] is not None and len(calls["args"]) == 2, "拉取不得带窗口参数"
+    assert calls["args"][1] == "hfq"
     assert len(df1) == 4  # 1/2-1/5
     assert len(df2) == 15  # 2/1-2/15 按区间过滤
     assert df2.iloc[0]["date"] == date(2024, 2, 1)
     assert df2.iloc[-1]["date"] == date(2024, 2, 15)
+
+
+def test_daily_adjusted_empty_fetch_not_cached(tmp_path, monkeypatch):
+    """限流偶发空响应：不落缓存（毒化全量键），下次调用重新拉取。"""
+    adapter = AkshareQuoteAdapter(cache_dir=tmp_path)
+    seq = {"n": 0}
+
+    def fake_fetch(self, sina_sym, adjust):
+        seq["n"] += 1
+        if seq["n"] == 1:
+            return pd.DataFrame({"date": [], "close": []})  # 空响应（带列）
+        return _synthetic_daily(date(2024, 1, 1), date(2024, 1, 31))
+
+    monkeypatch.setattr(AkshareQuoteAdapter, "_fetch_daily", fake_fetch)
+
+    df1 = adapter.daily_adjusted("600519", date(2024, 1, 2), date(2024, 1, 5))
+    assert df1.empty, "空响应如实返回空（调用方按数据不足 skip）"
+    df2 = adapter.daily_adjusted("600519", date(2024, 1, 2), date(2024, 1, 5))
+    assert seq["n"] == 2, "空结果未落缓存 → 第二次重试拉取"
+    assert len(df2) == 4, "重试成功后正常返回并缓存"
 
 
 def test_index_daily_caches_full_then_filters(tmp_path, monkeypatch):
@@ -197,5 +224,5 @@ def test_fetch_daily_retries_on_requests_connection_error(tmp_path, monkeypatch)
     monkeypatch.setattr(ak, "stock_zh_a_daily", _fail)
     adapter = AkshareQuoteAdapter(cache_dir=tmp_path)
     with pytest.raises(req_exc.ConnectionError):
-        adapter._fetch_daily("sh600519", date(2024, 1, 2), date(2024, 1, 5), "hfq")
+        adapter._fetch_daily("sh600519", "hfq")  # 全量拉取（无窗口参数）
     assert calls["n"] == 3  # 重试 3 次（1 + 2 次重试）

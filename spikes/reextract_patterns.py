@@ -13,7 +13,12 @@ from eventreplay.storage import Storage
 
 
 def main() -> None:
-    storage = Storage("data/eventreplay.db")
+    from pathlib import Path
+
+    # 锚定仓库根的 DB（相对脚本位置解析）——曾因从 spikes/ 内运行、相对路径
+    # 落到 spikes/data/ 被 sqlite 静默新建空库，pattern 数为 0 白跑
+    db_path = Path(__file__).resolve().parent.parent / "data" / "eventreplay.db"
+    storage = Storage(str(db_path))
     reasoner = ClaudeCodeProvider(model_alias="haiku")
     embedder = Embedder()
     svc = PatternService(storage, reasoner, embedder)
@@ -21,6 +26,9 @@ def main() -> None:
     rids = [r[0] for r in storage._conn.execute("SELECT source_replay_id FROM patterns").fetchall()]
     total = len(rids)
     print(f"重提炼 {total} 个 Pattern...", flush=True)
+    if not rids:
+        import os
+        raise SystemExit(f"patterns 表为空（cwd={os.getcwd()}）——DB 路径/库状态异常，禁止空跑")
     ok = 0
     for i, rid in enumerate(rids, 1):
         try:

@@ -96,6 +96,23 @@ def test_observed_car_backfilled_from_measurement():
     assert v.observed_car_0_60 == -0.15  # LLM 给 -0.66 被覆盖
 
 
+def test_observed_car_matches_by_name_when_llm_uses_names():
+    """LLM 违背 prompt 用股票名称（实测重提炼试点出现）→ 名称兜底索引仍能对账。"""
+    ctx = _replay_ctx()
+    ctx["measurements"] = [
+        ImpactMeasurement(stock_id="000526", episode_id="r1-ep0", stock_name="学大教育", car_0_20=-0.09, car_0_60=-0.15)
+    ]
+    llm = _llm_out()
+    llm = llm.model_copy(update={
+        "archetypal_victims": [
+            _ArchetypalStockOut(industry_node="K12教培", stocks=["学大教育"], observed_car_0_20=-0.55, observed_car_0_60=-0.66)
+        ]
+    })
+    p = _run(llm, ctx)
+    assert p.archetypal_victims[0].observed_car_0_20 == -0.09  # 名称命中，回填真值
+    assert p.archetypal_victims[0].observed_car_0_60 == -0.15
+
+
 def test_observed_car_none_when_stock_not_measured():
     """无度量的典型标的（LLM 编造 car）→ 两字段置 None（绝不采信 LLM 数字）。"""
     p = _run(_llm_out(), _replay_ctx())

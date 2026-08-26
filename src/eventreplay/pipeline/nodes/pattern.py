@@ -93,9 +93,11 @@ class PatternExtractor(LLMNode):
     def system_prompt(self) -> str:
         return (
             "你是 A 股事件复盘规律提炼师。基于一个完整复盘（事件+受益/受损标的+量化度量），"
-            "提炼可复用规律模板：① 事件签名（冲击维度/影响方向/类型/受影响行业）；"
+            "提炼可复用规律模板：① 事件签名（冲击维度 shock_dimension 必须取：供给/需求/政策/流动性/情绪；"
+            "影响方向 impact_direction 必须取：利好/利空/中性/混合；事件类型/受影响行业）；"
             "② ≤200 字标准化事件摘要；③ 传导模板（事件→产业链→标的 的因果链）；"
-            "④ 典型受益/受损标的（其 observed_car 会被系统按真实度量核对回填："
+            "④ 典型受益/受损标的（stocks 必须用 6 位股票代码，照抄 measurements 的 stock_id，"
+            "不要用名称——系统按代码对账回填；其 observed_car 由系统按真实度量核对回填："
             "有度量的标的取度量真值、无度量的置空，LLM 数值不采信——无需精确估计 CAR）；"
             "⑤ 事件级定性 qualitative 4 维——"
             "magnitude 影响程度(极大/大/中/小:池|caar|>20%且n>10→极大,10-20%→大,5-10%→中,<5%→小)；"
@@ -118,15 +120,20 @@ class PatternExtractor(LLMNode):
         ar = replay_ctx.get("attribution_result")
 
         # 数值对账：LLM 抄录的 CAR 一律不采信——有度量则回填真值，无度量置 None
-        # （否则幻觉值会成为前瞻"预期 CAR"来源贯穿全链）
-        m_by_stock = {m.stock_id: m for m in measurements}
+        # （否则幻觉值会成为前瞻"预期 CAR"来源贯穿全链）。
+        # 索引按代码优先、名称兜底：LLM 即使违背 prompt 用了名称也能对上
+        m_by_key: dict[str, Any] = {m.stock_id: m for m in measurements}
+        for m in measurements:
+            name = getattr(m, "stock_name", None)
+            if name:
+                m_by_key.setdefault(name, m)  # 重名时不覆盖代码命中的主索引
 
         def _reconcile(stocks: list[_ArchetypalStockOut]) -> list[ArchetypalStock]:
             out: list[ArchetypalStock] = []
             for s in stocks:
                 # 组内多个标的都有度量时取 |car_0_20| 最大者为代表
                 # （"典型标的"本意即反应最强者，按 LLM 列出顺序取首个是任意行为）
-                hits = [m_by_stock[x] for x in s.stocks if x in m_by_stock]
+                hits = [m_by_key[x] for x in s.stocks if x in m_by_key]
                 rep = max(hits, key=lambda m: abs(m.car_0_20 or 0.0), default=None)
                 out.append(
                     ArchetypalStock(

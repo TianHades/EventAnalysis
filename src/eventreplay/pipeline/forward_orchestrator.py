@@ -92,9 +92,11 @@ class ForwardOrchestrator:
         event = event.model_copy(update={"market": self.market})  # 多市场标记（Phase 5）
 
         # 2. FindSimilar (复用 Phase 2)；degraded=embed 失败 → 检索不可用（纯结构化）
+        # 不传维度/方向过滤（spec §4.3）：LLM 对同一事件的 impact_direction 解析
+        # （如"利好"）与 Pattern 标注（如"混合"）口径不一致时会整批误杀强向量匹配
+        # （实测 2019 沙特油田被袭 cosine 0.777 被 direction 严格相等过滤剔掉 → 误落定性层）
         results, retrieval_degraded = self.ps.find_similar(
             event.description, top_k=top_k,
-            shock_dimension=event.shock_dimension, impact_direction=event.impact_direction,
         )
         patterns = [p for p, _ in results]
         scores = [s for _, s in results]

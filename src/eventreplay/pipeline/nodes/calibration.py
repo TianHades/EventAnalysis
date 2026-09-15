@@ -1,4 +1,4 @@
-"""InitialCalibrationNode：盘后校准（实际 [+1]/[+5] CAR vs 预期 → 确认/背离）。"""
+"""盘后校准：InitialCalibrationNode（数值 CAR 对账）+ calibrate_qualitative（五维定性对账）。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,39 @@ from ...adapters.quote_adapter import AkshareQuoteAdapter
 from ...adapters.stock_master import StockMaster
 from ...measurement.event_study import measure_stock
 from ...schema import ForwardPrediction, StockDirection
+from ...schema.forward import QualitativeCalibration, QualitativeForecast
+from ...schema.pattern import PatternQualitative, QUALITATIVE_LABELS
 from ..node import Node
+
+# 五维定性对账的维度键（单一事实源：schema/pattern.py QUALITATIVE_LABELS）
+QUALITATIVE_DIMS = tuple(QUALITATIVE_LABELS)
+
+
+def calibrate_qualitative(
+    forecast: QualitativeForecast, actual: PatternQualitative
+) -> QualitativeCalibration:
+    """校准层：事前五维预判 vs 事后实测（extract_pattern 产物）逐维对账。
+
+    严格相等判定（档位相邻不给半分，MVP 口径）；任一侧缺失 → 无法对账而非猜对。
+    对账价值排序：低置信度判对（可上调置信）> 高置信度判错（需修 prompt 锚点）。
+    """
+    dim_results: dict[str, str] = {}
+    hit = comparable = 0
+    for dim in QUALITATIVE_DIMS:
+        f = getattr(forecast, dim, None)
+        a = getattr(actual, dim, None)
+        if f is None or a is None:
+            dim_results[dim] = "预判缺失" if f is None else "实测缺失"
+            continue
+        ok = f == a
+        dim_results[dim] = "一致" if ok else "不一致"
+        comparable += 1
+        hit += int(ok)
+    return QualitativeCalibration(
+        dim_results=dim_results,
+        hit_rate=(hit / comparable) if comparable else None,
+        notes="严格相等口径；相邻档位（如 中期/短期脉冲）记不一致",
+    )
 
 
 def _parse_range(range_str: str | None) -> tuple[float, float] | None:

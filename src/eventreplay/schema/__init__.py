@@ -12,7 +12,12 @@ from .common import (
     Tier,
 )
 from .event import Event, EventEpisode
-from .forward import ForwardPrediction, ForwardResult
+from .forward import (
+    ForwardPrediction,
+    ForwardResult,
+    QualitativeCalibration,
+    QualitativeForecast,
+)
 from .measurement import ImpactMeasurement
 from .news import CandidateEvent, MiningJob, NewsItem
 from .pattern import ArchetypalStock, Pattern, PatternQualitative
@@ -31,6 +36,8 @@ __all__ = [
     "EventEpisode",
     "ForwardPrediction",
     "ForwardResult",
+    "QualitativeForecast",
+    "QualitativeCalibration",
     "Stock",
     "ImpactMeasurement",
     "AttributionResult",

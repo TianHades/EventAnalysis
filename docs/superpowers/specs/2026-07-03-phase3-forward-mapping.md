@@ -193,6 +193,16 @@ class ForwardOrchestrator:
 ## 6 局限（前瞻≠确定；历史不一定重演；Pattern 样本 N 个）
 ```
 
+**修订（2026-09-06）：报告结构新增 §1.5 事件定性预判（五维）**
+
+- 动机：原设计中五维定性（程度/范围/持续/显著/超预期）只存在于事后 PatternQualitative，前瞻报告仅引用历史 Pattern 的定性做类比，对**当事事件**没有事前定性落点，事后也无定性对账闭环。
+- 新增 `QualitativeForecastNode`（`nodes/qualitative_forecast.py`），三层分工：
+  - **证据层**（程序）：`collect_anchors`——事件前 20 交易日基准/当事标的收益与超额（surprise 的"已定价程度"代理）+ 相似 Pattern 实测五维众数；全容错。
+  - **判定层**（LLM）：带锚点综合五维 + **逐维置信度**（高/中/低）；锚点冲突须在 rationale 写取舍；LLM 失败→先例众数兜底（`source="fallback"`，报告打 banner）。
+  - **校准层**（程序）：`calibrate_qualitative`（`nodes/calibration.py`）——事后与 extract_pattern 实测 PatternQualitative 逐维严格相等对账 + hit_rate。
+- 报告章节编号取 **§1.5**（而非重排 1-6），保持本节既有章节号与外部引用稳定。
+- 五维档位/维度枚举单一事实源：`schema/pattern.py` 模块级 `QUALITATIVE_LABELS`（PatternQualitative / QualitativeForecast / 对账维度共用）。
+
 ---
 
 ## 5. CLI

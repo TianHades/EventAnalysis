@@ -18,11 +18,21 @@ from eventreplay.pipeline.nodes.candidate import _CandOut, _CandsOut
 from eventreplay.pipeline.nodes.chain import _ChainNodeOut, _ChainOut
 from eventreplay.pipeline.nodes.forward_mapping import _BenefOut, _PredictedStockOut, _VictOut
 from eventreplay.pipeline.nodes.ingest import _IngestOut
+from eventreplay.pipeline.nodes.qualitative_forecast import _ForecastOut
 from eventreplay.schema import Event, ImpactDirection, ShockDimension, StockDirection
 from eventreplay.schema.pattern import ArchetypalStock, Pattern
 
 _DATES = pd.bdate_range("2026-06-01", periods=40).date
 _REACTION = date(2026, 7, 15)
+
+
+def _forecast_out() -> _ForecastOut:
+    """两个 FakeReasoner 共用的五维预判 mock。"""
+    return _ForecastOut(
+        magnitude="中", scope="中", persistence="中期",
+        significance="显著", surprise="超预期",
+        dim_confidence={"surprise": "中"}, rationale="测试五维预判",
+    )
 
 
 class FakeReasoner:
@@ -31,6 +41,8 @@ class FakeReasoner:
     model_alias = "fake"
 
     def call(self, *, system, user, output_model):
+        if output_model is _ForecastOut:
+            return _forecast_out()
         if output_model is _IngestOut:
             return _IngestOut(
                 event_type="地缘", shock_dimension="政策", impact_direction="混合",
@@ -246,6 +258,8 @@ class FailMappingReasoner:
     model_alias = "fake"
 
     def call(self, *, system, user, output_model):
+        if output_model is _ForecastOut:
+            return _forecast_out()
         if output_model is _IngestOut:
             return _IngestOut(
                 event_type="地缘", shock_dimension="政策", impact_direction="混合",

@@ -7,6 +7,16 @@ from pydantic import BaseModel, Field, field_validator
 
 from .common import ImpactDirection, ShockDimension
 
+# 五维定性档位的单一事实源：PatternQualitative（实测）与 QualitativeForecast（事前预判）
+# 共用；维度键 = dict 的 keys（calibration 对账 / forecast 节点遍历均由此派生）。
+QUALITATIVE_LABELS: dict[str, set[str]] = {
+    "magnitude": {"极大", "大", "中", "小"},
+    "scope": {"广", "中", "窄"},
+    "persistence": {"长期", "中期", "短期脉冲"},
+    "significance": {"显著", "不显著"},
+    "surprise": {"超预期", "符合预期", "利好出尽"},
+}
+
 
 class ArchetypalStock(BaseModel):
     """典型标的（观察到的单值，非区间——区间待多 Replay 聚合，后续）。"""
@@ -33,13 +43,7 @@ class PatternQualitative(BaseModel):
     pool_caar_beneficiary: float | None = None
     pool_caar_victim: float | None = None
 
-    _VALID_LABELS: ClassVar[dict[str, set[str]]] = {
-        "magnitude": {"极大", "大", "中", "小"},
-        "scope": {"广", "中", "窄"},
-        "persistence": {"长期", "中期", "短期脉冲"},
-        "significance": {"显著", "不显著"},
-        "surprise": {"超预期", "符合预期", "利好出尽"},
-    }
+    _VALID_LABELS: ClassVar[dict[str, set[str]]] = QUALITATIVE_LABELS
 
     @field_validator("magnitude", "scope", "persistence", "significance", "surprise", mode="before")
     @classmethod

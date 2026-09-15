@@ -9,6 +9,7 @@ from ..adapters.stock_master import StockMaster
 from ..llm import Reasoner
 from ..pipeline.nodes.calibration import InitialCalibrationNode
 from ..pipeline.nodes.forward_mapping import ForwardMappingNode
+from ..pipeline.nodes.qualitative_forecast import ANCHOR_TARGETS, QualitativeForecastNode
 from ..pipeline.nodes.ingest import EventIngestNode
 from ..pipeline.nodes.chain import IndustryChainNode
 from ..pipeline.nodes.candidate import CandidateNode
@@ -64,6 +65,10 @@ class ForwardOrchestrator:
         # Phase 3 新增节点
         self.forward_mapping = ForwardMappingNode(reasoner, stock_master, storage)
         self.calibration = InitialCalibrationNode(quote_adapter, stock_master, storage, benchmark=self.benchmark)
+        # 五维定性预判（事件级；证据层锚点 + LLM 判定 + 先例众数兜底）
+        self.qualitative_forecast = QualitativeForecastNode(
+            reasoner, quote_adapter, storage, benchmark=self.benchmark
+        )
 
     def forward(
         self,
@@ -120,6 +125,20 @@ class ForwardOrchestrator:
             result.matched_pattern_ids = [p.source_replay_id for p in patterns]
             result.matched_scores = scores
             result.matched_patterns = patterns
+
+        # 4.5 事件五维定性预判（qualitative 层传空 patterns，与报告 §2 口径一致）。
+        # 节点内已有两层兜底（collect_anchors 全容错 + LLM 失败→先例众数），外层 try 仅防
+        # 缓存读写/模型构造等意外——失败不阻塞主报告，但异常摘要写入报告（不静默吞）。
+        try:
+            result.qualitative_forecast = self.qualitative_forecast.run_cached({
+                "event": event,
+                "patterns": patterns if level in ("strong", "weak") else [],
+                "beneficiaries": result.beneficiary_predictions[:ANCHOR_TARGETS],
+                **ctx,
+            })
+        except Exception as exc:
+            result.qualitative_forecast = None
+            result.qualitative_forecast_error = f"{type(exc).__name__}: {exc}"[:200]
 
         # 5. 报告（retrieval_degraded 用于区分"库空/真无匹配/检索不可用"三态）
         markdown = self._generate_report(result, retrieval_degraded=retrieval_degraded)
@@ -243,6 +262,30 @@ class ForwardOrchestrator:
         lines.append(f"- 描述：{result.event.description or '—'}")
         lines.append(f"- 日期：{result.event.reaction_date or '—'}")
         lines.append(f"- 类型：{result.event.event_type or '—'}")
+        lines.append("")
+
+        # 1.5 事件定性预判（五维，事前；编号 1.5 保持 spec §6 章节号稳定）
+        lines.append("## 1.5 事件定性预判（五维，事前）")
+        qf = result.qualitative_forecast
+        if qf is None:
+            reason = result.qualitative_forecast_error or "原因未知"
+            lines.append(f"- （定性预判节点未产出：{reason}）")
+        else:
+            lines.append("| 维度 | 预判 | 置信度 |")
+            lines.append("|---|---|---|")
+            for key, label in (
+                ("magnitude", "程度"), ("scope", "范围"), ("persistence", "持续"),
+                ("significance", "显著"), ("surprise", "超预期"),
+            ):
+                val = getattr(qf, key)
+                lines.append(f"| {label} {key} | {val if val else '—'} | {qf.dim_confidence.get(key, '—')} |")
+            lines.append("")
+            if qf.rationale:
+                lines.append(f"- 依据：{qf.rationale}")
+            if qf.anchors_used:
+                lines.append(f"- 程序锚点：{'；'.join(qf.anchors_used[:6])}")
+            if qf.source == "fallback":
+                lines.append("- ⚠️ LLM 推理失败，以上为程序兜底（先例众数），置信度低")
         lines.append("")
 
         # 2 相似 Pattern（含事件影响定性，供本次类比参考）

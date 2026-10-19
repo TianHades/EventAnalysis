@@ -271,6 +271,6 @@ eventreplay forward --desc "..." --date 2026-07-15 --mode post --top-k 3
 
 > 本节为 Phase 3 实现完成后的回写；上文为 2026-07-03 设计 + 2026-09-06 §1.5 修订，未改写。
 
-- **三层降级路由已实现**：strong / weak / qualitative 三档路由与对应报告模板均已实现，`eventreplay forward` 可用；已产出 **8 份 `fwd_*` 评估报告**（`reports/fwd_*.md`，最新 `reports/fwd_20261001_repo_outright.md`，2026-10-01）；另有 **14 份按日期命名的前瞻预判报告**。
+- **三层降级路由已实现**：strong / weak / qualitative 三档路由与对应报告模板均已实现，`eventreplay forward` 可用；已产出 **8 份 `fwd_*` 评估报告**（`reports/fwd_*.md`，最新 `reports/fwd_20261001_repo_outright.md`，2026-10-01）；另有 **16 份按日期命名的前瞻预判报告**，其中 2 份由 2026-10-19 monitor 真实链路自动触发（强 Pattern 指导）。
 - **五维事前定性 + 盘后对账（§1.5）已实现**：`nodes/qualitative_forecast.py`（证据层 `collect_anchors` / 判定层 LLM + 逐维置信度 / 先例众数兜底 banner）与报告 §1.5 章节已落地；盘后对账逻辑 `calibrate_qualitative`（`nodes/calibration.py`）已实现并有单测。
 - **未接线（明确偏离）**：`calibrate_qualitative` **无调用方**，未接入 `forward` 主链路——盘后定性对账结果当前不会自动计算/回写，§1.5 的“事前定性 → 事后对账”闭环需该节点接线后才完整。

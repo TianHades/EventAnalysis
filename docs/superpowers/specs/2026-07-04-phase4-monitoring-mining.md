@@ -285,7 +285,8 @@ eventreplay monitor --interval 30m --push-webhook https://... \
 
 > 本节为 Phase 4 实现完成后的回写；上文为 2026-07-04 的设计历史，未改写。
 
-- **落地情况**：功能2（`mine-events` 挖掘候选 → 用户审核 → `batch-replay` 批量 replay + extract-pattern）与功能1（`monitor` 定时采集 → 抽取打分 → 高分 `forward` → 推送）均已实现；完整 CLI 为 8 子命令（含 `refresh-sw` 等配套命令）。本地库已累计 `events` 61、`seen_events` 83、`skip_log` 673、`pipeline_runs` 525；`reports/monitoring/` 下已产出 10 份监测报告。
+- **落地情况**：功能2（`mine-events` 挖掘候选 → 用户审核 → `batch-replay` 批量 replay + extract-pattern）与功能1（`monitor` 定时采集 → 抽取打分 → 高分 `forward` → 推送）均已实现；完整 CLI 为 8 子命令（含 `refresh-sw` 等配套命令）。本地库已累计 `events` 61、`seen_events` 107（跑前 83）、`skip_log` 673、`pipeline_runs` 531（跑前 525）；`reports/monitoring/` 下已产出 12 份监测报告（跑前 10）。
+- **真实链路实跑（2026-10-19）**：`monitor --source multi` 两轮——默认阈值轮采集 51→初筛 25→识别 13 事件、0 触发；放宽阈值轮（`--surprise 0 --impact 3`）采集 66→初筛 28→识别 9 事件、触发 2 条（强 Pattern 指导，各 3 受益/3 受损 + 预期 CAR 区间），归档 2 份 monitoring 报告 + 2 份根目录前瞻报告；飞书推送以 `--feishu-webhook=` 关闭。
 - **事件打分实际为 5 维（超出原设计 2 维）**：实际实现 `significance` / `a_share` / `surprise_timing` / `surprise_magnitude` / `impact_scale` 五维；原 §3/§4.2 只设计重大性 + A股可达性两维，另 3 维（超预期时点 / 超预期幅度 / 影响规模）为设计外扩展的细分打分。
 - **推送渠道实际含飞书**：原 §4.7 设计为企微/钉钉 webhook + 本地文件；实际实现企微/钉钉 webhook、**飞书 webhook**、本地文件并存。
 - **`news_screening` 两级漏斗（设计外新增）**：新闻采集后先经两级初筛（规则级 → 事件抽取级）再进 `EventExtractor`，用于在 LLM 打分前压低噪声与成本；该模块不在原设计中。

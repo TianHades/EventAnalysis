@@ -53,5 +53,6 @@ P1（共享层）→ P2（NewsAdapter）→ P3（功能2挖掘）→ P4（功能
 
 ### 现状与缺口
 
-- 功能2（`mine-events` → 审核 → `batch-replay`）与功能1（`monitor` 采集→抽取→高分 forward→推送）均已落地；库内 `seen_events` 83、`skip_log` 673，`reports/monitoring/` 已产出 10 份监测报告。
-- **缺口**：监测当前固定 A 股（`cli.py:329` 以 `make_adapters("A股")` 装配）；真实新闻源 + 真实 LLM 的端到端监测本轮未复跑。
+- 功能2（`mine-events` → 审核 → `batch-replay`）与功能1（`monitor` 采集→抽取→高分 forward→推送）均已落地；库内 `seen_events` 107（跑前 83）、`skip_log` 673，`reports/monitoring/` 已产出 12 份监测报告（跑前 10）。
+- **真实链路实跑（2026-10-19）**：`monitor --source multi` 两轮——① 默认阈值：采集 51→初筛 25→识别 13 事件、0 触发（最高分事件未过 surprise 阈值，符合预期）；② `--surprise 0 --impact 3`：采集 66→初筛 28→识别 9 事件、触发 2 条并各生成前瞻报告与归档（强 Pattern 指导，各 3 受益/3 受损）。飞书推送已用 `--feishu-webhook=` 关闭，仅归档到 `reports/monitoring/`。
+- **缺口**：监测当前固定 A 股（`cli.py:329` 以 `make_adapters("A股")` 装配）；`monitor` 的真实 LLM 链路已实跑通过，跨市场监测未接入。

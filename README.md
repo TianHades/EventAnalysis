@@ -20,7 +20,7 @@
 
 **58 个 Pattern**，覆盖 **2016-2025 十年**外部系统性冲击事件，全带 5 维定性标签（程度/范围/持续/显著/超预期）与 embedding 向量（58/58），Pattern 数据以 TEXT（JSON）持久化；数据库 measurements 共 **2,746** 条（events 61 / patterns 58 / pipeline_runs 525；replays 0，见「已知限制」）。
 
-累计产出 **96 份报告**，覆盖 2016–2026（复盘、前瞻、监测三类产物；含港股复盘示例 `reports/hk_tencent_dump.md`）。
+累计产出 **100 份报告**（2026-10-19 统计，含当日 monitor 实跑新增），覆盖 2016–2026（复盘、前瞻、监测三类产物；含港股复盘示例 `reports/hk_tencent_dump.md`）。
 
 | 年份 | Pattern | 代表事件 |
 |------|---------|---------|

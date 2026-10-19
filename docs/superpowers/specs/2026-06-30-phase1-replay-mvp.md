@@ -288,7 +288,7 @@ spec v2.5 已由 spike 实测奠基 → writing-plans 生成 Phase 1 实施计�
 
 > 本节为 Phase 1 实现完成后的回写；上文为 2026-06-30 设计（含 v2.5/v3.0 变更日志）与实现期迭代记录，未改写。
 
-- **落地情况**：7 节点流水线 + 影响度量引擎 + markdown 报告模板全部落地。代码规模：`src/eventreplay` 60 个 `.py` / 7,933 行；`tests` 32 个测试文件 / 6,646 行；`spikes` 39 个脚本 / 3,540 行。本地库 `data/eventreplay.db`（11.8MB，9 表）已累计：`events` 61、`chains` 61、`attribution_results` 61、`measurements` 2,746、`patterns` 58、`pipeline_runs` 525、`seen_events` 83、`skip_log` 673、`replays` 0。`reports/` 共 96 份 `.md` = **64 份复盘报告** + 22 份前瞻（`reports/` 顶层）+ 10 份监测（`monitoring/`），按报告首行标题判定，覆盖 2016–2026 年事件。
+- **落地情况**：7 节点流水线 + 影响度量引擎 + markdown 报告模板全部落地。代码规模：`src/eventreplay` 60 个 `.py` / 7,933 行；`tests` 32 个测试文件 / 6,646 行；`spikes` 39 个脚本 / 3,540 行。本地库 `data/eventreplay.db`（11.8MB，9 表）已累计：`events` 61、`chains` 61、`attribution_results` 61、`measurements` 2,746、`patterns` 58、`pipeline_runs` 531（跑前 525）、`seen_events` 107（跑前 83）、`skip_log` 673、`replays` 0。`reports/` 收尾时点 96 份 `.md` = **64 份复盘报告** + 22 份前瞻（`reports/` 顶层）+ 10 份监测（`monitoring/`），按报告首行标题判定，覆盖 2016–2026 年事件；2026-10-19 monitor 实跑后为 100 份（64 + 24 + 12）。
 - **CLI 实际 8 子命令**：`replay`、`extract-pattern`、`find-similar`、`refresh-sw`、`forward`、`mine-events`、`batch-replay`、`monitor`。
 - **未落地/偏离（已知）**：
   - `--episode-dates` / `--from-file` 未实现；replay 入口为单事件 `--desc` + `--date`。多 episode 仅 schema + 度量支持，无 CLI 入口；

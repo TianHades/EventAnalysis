@@ -254,7 +254,7 @@ M0.6（CLI 封装）可与 M1 并行（M1 不依赖 LLM）。M1 是纯量化、�
 | M4.1 typer CLI | **部分偏离** | 实际入口 `replay --desc --date [--reaction-date] [--benchmark] [--event-id] [--model] [--market] [--db]`（`cli.py:92-102`）；**无 `--episode-dates` / `--from-file`**；报告命名实际为 `{日期}_{事件描述}.md`（`measurement/report_template.py:16-24`、`pipeline/orchestrator.py:179-181`），非计划的 `reports/<event-id>.md`，`--event-id` 只作事件 id 不改文件名 |
 | M4.2 端到端串联 | **完成** | `pipeline/orchestrator.py` 串 7 节点 + 报告落盘；已产出 64 份复盘报告（`reports/`，覆盖 2016–2026） |
 | M5.1 种子 fixture 固化 | **未做** | `tests/fixtures/seeds/*.yaml` 未落地；验收脚本在 `spikes/accept_5seeds.py` |
-| M5.2 端到端冒烟 | **部分完成** | 历史事件已真实跑通并入库（61 events，已产出 64 份复盘报告）；`tests/test_real_smoke.py`（真实 LLM 端到端）本轮未运行 |
+| M5.2 端到端冒烟 | **完成（2026-10-19 补跑）** | 历史事件已真实跑通并入库（61 events，已产出 64 份复盘报告）；`tests/test_real_smoke.py`（真实 LLM 端到端）**2026-10-19 实跑通过：1 passed / 494.47s**，7/7 节点 `done`、31 条 measurements、完整报告生成 |
 | M5.3 报告人工抽查 | **未做（本次复核）** | 报告模板与产物齐备，本轮未重新做人工抽查 |
 
 ### 实现期偏离（2026-10-19 复核）

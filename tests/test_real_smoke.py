@@ -15,6 +15,12 @@ from eventreplay.llm import ClaudeCodeProvider, LLMNodeFailed
 from eventreplay.pipeline.orchestrator import ReplayOrchestrator
 from eventreplay.storage import Storage
 
+# pytest 不会自动加载 .env；本测试需网关鉴权，自行加载以保证 `pytest tests/test_real_smoke.py` 可直接跑
+# （只影响本文件，不改变其他测试的行为）
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def _env_ready() -> bool:
     return bool(os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("ANTHROPIC_API_KEY"))

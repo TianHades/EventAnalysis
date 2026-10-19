@@ -172,8 +172,9 @@ eventreplay batch-replay --job-file data/mining_candidates_2024-01-01_2024-12-31
 # 日常测试（离线，跳过触网/真实 LLM 的 smoke；约 30s）
 pytest --ignore=tests/test_real_smoke.py
 
-# 含真实数据/LLM 的端到端 smoke（慢，需鉴权环境变量）
-pytest
+# 真实 LLM 端到端 smoke（约 8 分钟；触网 + 需 .env 鉴权；该测试会自行加载 .env）
+pytest tests/test_real_smoke.py -v
+# 2026-10-19 实测：1 passed in 494.47s（7/7 节点 done、31 measurements、完整报告生成）
 ```
 
 ## 架构
@@ -222,4 +223,5 @@ pytest
 - **多 episode 无 CLI 入口**：`--episode-dates` / `--from-file` 在 Phase 1 spec 中设计但 CLI 未实现，当前无法直接跑多子事件事件集。
 - **可复现记录缺失**：`replays` 表当前 0 条（events 61 / measurements 2,746 / patterns 58 有数据），历史复盘未回填 pipeline/prompt 版本与各节点产物。
 - **多市场仅港股**：美股、港股 GEM、港股通南向均未接入；`monitor` 监测链路固定 A 股。
-- **种子 fixture 未落地**：`tests/fixtures/seeds/` 的种子事件 yaml 未实现，单事件真实 smoke 仍为手动慢测（`tests/test_real_smoke.py`，需鉴权环境变量，约 7–8 分钟、6 次 claude 调用）。
+- **种子 fixture 未落地**：`tests/fixtures/seeds/` 的种子事件 yaml 未实现，单事件真实 smoke 仍为手动慢测（`tests/test_real_smoke.py`，需鉴权环境变量，约 7–8 分钟、6 次 claude 调用；2026-10-19 实跑通过，见「开发」）。
+- **报告未标注免责声明**：总计划要求输出标注"研究用途，非投资建议"，当前复盘/前瞻报告正文尚未标注（推送卡片仅有一句"前瞻预判 ≠ 确定结论"备注）。

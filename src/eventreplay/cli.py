@@ -251,14 +251,19 @@ def mine_events(
         start_date=start, end_date=end, top_n=top_n, industry=industry,
         shock_dimension=shock_dimension, raw_top=raw_top, market=market, echo=typer.echo,
     )
+    # 阶段1 LLM 失败时 mine() 返回 {"final": [], ..., "paths": {}}（未落盘）→ 友好报错而非 KeyError
+    paths = result.get("paths") or {}
+    if not paths.get("final"):
+        typer.echo("[fail] 阶段1 LLM 未能产出候选，未生成文件（见上方日志）")
+        raise typer.Exit(1)
     typer.echo(
         f"[done] 最终 {len(result['final'])} 候选"
         f"（raw {result['raw_count']} → 过滤剔 {result['filtered_out']} → LLM剔 {result['llm_rejected']}）"
     )
-    typer.echo(f"  最终: {result['paths']['final']}")
-    typer.echo(f"  原始: {result['paths']['raw']}")
-    typer.echo(f"  过滤: {result['paths']['filtered']}")
-    typer.echo(f"  审核编辑后跑: eventreplay batch-replay --job-file {result['paths']['final']}")
+    typer.echo(f"  最终: {paths['final']}")
+    typer.echo(f"  原始: {paths.get('raw', '-')}")
+    typer.echo(f"  过滤: {paths.get('filtered', '-')}")
+    typer.echo(f"  审核编辑后跑: eventreplay batch-replay --job-file {paths['final']}")
 
 
 @app.command("batch-replay")

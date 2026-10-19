@@ -268,3 +268,25 @@ def test_mine_system_prompt_uses_market():
     assert "A 股事件研究分析师" in a_share or "A股事件研究分析师" in a_share
     assert "港股" in hk
     assert "A 股" not in hk.replace("A股", "")  # 港股版本不再硬编码 A 股口径
+
+
+def test_mine_stage1_llm_failure_returns_empty_paths(tmp_path):
+    """阶段1 LLM 异常 → 降级返回 paths={} 且不落盘（CLI 据此友好报错而非 KeyError）。"""
+
+    class _FailingReasoner:
+        model_alias = "fake"
+
+        def call(self, *, system, user, output_model):
+            raise RuntimeError("网关超时")
+
+    miner = HistoricalEventMiner(_FailingReasoner(), None)
+    lines: list[str] = []
+    result = miner.mine(
+        start_date="2023-01-01", end_date="2023-12-31",
+        out_dir=tmp_path, echo=lines.append,
+    )
+    assert result == {
+        "final": [], "raw_count": 0, "filtered_out": 0, "llm_rejected": 0, "paths": {},
+    }
+    assert any("阶段1 LLM 失败" in line for line in lines)
+    assert not list(tmp_path.glob("*.json"))  # 失败分支不落盘任何中间文件

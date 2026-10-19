@@ -1,5 +1,7 @@
 # §4.0 数据可用性 Spike 结果（2026-06-30 实跑）
 
+> 【2026-10-19 回写】本文件为 2026-06-30 的历史 spike 结论；其中“成分股仅一级可用/完全不可得”已被 tushare 申万三级方案替代，“eastmoney/baostock 不可达”与“claude --bare”等结论仍成立。
+
 环境：Windows / Python 3.10.10 / akshare 1.18.25 / baostock 0.8.90 / claude CLI 2.1.177。网络经用户中途修复（szse/sina/legulegu/pythonhosted 恢复；eastmoney/baostock 仍不可达）。本报告为**实跑 ground truth**，用于回写 Phase 1 spec v2.5、替换此前所有 spike-gated 推测项。
 
 ---

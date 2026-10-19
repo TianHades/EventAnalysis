@@ -1,10 +1,10 @@
 # Phase 4 Spec：事件采集与监测推送（Event Ingestion & Monitoring）
 
-- **状态**：设计完成，待用户审阅 → writing-plans
+- **状态**：已实现（2026-10-19 状态回写；设计与实现的偏离见文末）
 - **日期**：2026-07-04
 - **所属总计划**：[2026-06-30-event-replay-master-plan.md](./2026-06-30-event-replay-master-plan.md) 的 Phase 4
 - **依赖**：Phase 1（ReplayOrchestrator / QuoteAdapter / StockMaster / run_cached）；Phase 2（PatternService.extract_pattern / PatternStore）；Phase 3（ForwardOrchestrator）
-- **关键决策**：① 双功能共享事件采集/抽取/打分层 ② 功能2（历史建库）优先于功能1（监测推送）——规律库空是 Phase 3 瓶颈 ③ 功能2事件源用 LLM 知识 + 用户审核，不依赖历史新闻归档 ④ 功能1新闻源待 spike，MVP 可先文件/LLM 知识输入 ⑤ 批量 replay 串行 + 断点续跑 ⑥ 事件打分：重大性 + A股可达性 + 冲击维度多样性
+- **关键决策**：① 双功能共享事件采集/抽取/打分层 ② 功能2（历史建库）优先于功能1（监测推送）——规律库空是 Phase 3 瓶颈 ③ 功能2事件源用 LLM 知识 + 用户审核，不依赖历史新闻归档 ④ 功能1新闻源待 spike，MVP 可先文件/LLM 知识输入【2026-10-19 回写：此处“待 spike”与 §4.1“spike 确认”并存系文档历史；实际新闻源已实现为 akshare+cctv+cls+jin10+jiuyan 融合，见文末】 ⑤ 批量 replay 串行 + 断点续跑 ⑥ 事件打分：重大性 + A股可达性 + 冲击维度多样性
 
 ---
 
@@ -99,6 +99,8 @@ class MiningJob(BaseModel):
     created_at: datetime
 ```
 
+> 【2026-10-19 回写：实际事件打分为 5 维——`significance` / `a_share` / `surprise_timing` / `surprise_magnitude` / `impact_scale`；§3/§4.2 的 2 维为原设计口径，后 3 维为设计外新增，见文末】
+
 ---
 
 ## 4. 新增组件
@@ -173,7 +175,7 @@ class _EventExtractOut(BaseModel):
 
 ### 4.6 MonitoringPusher（功能1定时监测）
 
-- **职责**：APScheduler 定时任务 → 采集 → 抽取 → 高分 forward → 推送
+- **职责**：APScheduler 定时任务 → 采集 → 抽取 → 高分 forward → 推送【2026-10-19 回写：实际未用 APScheduler，改为 `while True + sleep` 单进程循环（`pipeline/monitoring_pusher.py:22-41`），见文末】
 - **逻辑**：
   1. 定时（如 30min）调 NewsAdapter.fetch_latest
   2. EventExtractor 抽取 + 打分
@@ -189,7 +191,7 @@ class _EventExtractOut(BaseModel):
 class PushChannel(Protocol):
     def push(self, *, title: str, markdown: str, event: CandidateEvent) -> bool: ...
 ```
-- **WebhookChannel**：POST 到企微/钉钉机器人 webhook（markdown 消息）
+- **WebhookChannel**：POST 到企微/钉钉机器人 webhook（markdown 消息）【2026-10-19 回写：实际实现另有飞书 webhook，渠道为企微/钉钉/飞书 + 本地文件，见文末】
 - **FileChannel**：写本地文件（reports/monitoring/）
 - **MVP**：这两个渠道；后续可加邮件/APP
 
@@ -213,6 +215,8 @@ eventreplay monitor --interval 30m --push-webhook https://... \
     --significance 3 --a-share 4
 # APScheduler 定时跑；Ctrl-C 停止
 ```
+
+> 【2026-10-19 回写：`--interval` 实际只接受整数分钟（如 `--interval 30`），不支持 `30m` 写法；另新增 `--source` / `--screen` / `--impact` / `--surprise` 筛选参数，见文末】
 
 ---
 
@@ -274,3 +278,17 @@ eventreplay monitor --interval 30m --push-webhook https://... \
 - **功能1新闻源待 spike**：akshare 财经新闻/RSS 可用性待验证；MVP 可降级 LLM 知识近期事件
 - **推送渠道 MVP webhook+文件**：YAGNI；企微/钉钉机器人用 webhook 即可，不做富交互
 - **事件打分双维度（重大性+A股可达性）**：工程判断；单一维度不够，重大但无 A 股标的的事件（如纯海外宏观）不值得 replay
+
+---
+
+## 实现期状态回写（2026-10-19）
+
+> 本节为 Phase 4 实现完成后的回写；上文为 2026-07-04 的设计历史，未改写。
+
+- **落地情况**：功能2（`mine-events` 挖掘候选 → 用户审核 → `batch-replay` 批量 replay + extract-pattern）与功能1（`monitor` 定时采集 → 抽取打分 → 高分 `forward` → 推送）均已实现；完整 CLI 为 8 子命令（含 `refresh-sw` 等配套命令）。本地库已累计 `events` 61、`seen_events` 83、`skip_log` 673、`pipeline_runs` 525；`reports/monitoring/` 下已产出 10 份监测报告。
+- **事件打分实际为 5 维（超出原设计 2 维）**：实际实现 `significance` / `a_share` / `surprise_timing` / `surprise_magnitude` / `impact_scale` 五维；原 §3/§4.2 只设计重大性 + A股可达性两维，另 3 维（超预期时点 / 超预期幅度 / 影响规模）为设计外扩展的细分打分。
+- **推送渠道实际含飞书**：原 §4.7 设计为企微/钉钉 webhook + 本地文件；实际实现企微/钉钉 webhook、**飞书 webhook**、本地文件并存。
+- **`news_screening` 两级漏斗（设计外新增）**：新闻采集后先经两级初筛（规则级 → 事件抽取级）再进 `EventExtractor`，用于在 LLM 打分前压低噪声与成本；该模块不在原设计中。
+- **CLI 参数实际增补**：`--source` / `--screen` / `--impact` / `--surprise` 为原设计未列出的筛选参数；`--interval` **只接受整数分钟**（如 `--interval 30`），不支持上文示例的 `30m` 写法。
+- **定时调度未用 APScheduler**：原设计与 §7 技术栈写 APScheduler；实际实现为 `run_monitor_loop` 的 `while True + sleep` 单进程循环（`src/eventreplay/pipeline/monitoring_pusher.py:22-41`），`--interval` 决定 sleep 分钟数，`pyproject.toml` 未引入 APScheduler 依赖。
+- **“待 spike”与“spike 已确认”并存的澄清**：关键决策 ④ 与 §9 决策日志仍写“功能1新闻源待 spike”，而 §4.1 写“spike 确认 2026-07-04”，二者系文档迭代历史。实际新闻源为 **akshare（含 cctv）+ 财联社（cls）+ 金十（jin10）+ 韭研公社（jiuyan）融合**；§4.1 中韭研事件日历 API 鉴权受限、`news_economic_baidu` 不可用等结论仍成立，MVP 未接入事件日历。

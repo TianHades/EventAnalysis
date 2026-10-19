@@ -1,6 +1,6 @@
 # Phase 1 Spec：复盘 MVP
 
-- **状态**：v3.0（实现期迭代：+90 窗口 / tushare 权威成分股 / car_best 显著性 / 报告模板兜底 / .env 配置）
+- **状态**：v3.0 已实现（2026-10-19 状态回写；实现期偏离与未落地项见文末）
 - **日期**：2026-06-30
 - **所属总计划**：[2026-06-30-event-replay-master-plan.md](./2026-06-30-event-replay-master-plan.md) 的 Phase 1
 - **数据 spike 结果**：[2026-06-30-spike-results.md](./2026-06-30-spike-results.md)（实跑 ground truth）
@@ -38,6 +38,8 @@
 | **存储** | SQLite：`events`/`replays`/`measurements`/`chains`/`pipeline_runs`/`skip_log` |
 
 > 产业链：Phase 1 为 LLM 实时推理产物。每节点输出自由文本描述 + 申万行业代码（粒度=一级，受成分股可得性约束）；StockMaster 校验存在性 + 语义匹配（§3.1）。
+>
+> 【2026-10-19 回写：成分股口径已由 tushare 申万三级（`refresh-sw` 预拉本地）+ ThemeIndex curated 兜底 + LLM 提议 resolve 反查替代；“粒度=一级、仅一级可用”为 v2.5 旧结论，见文末】
 
 ---
 
@@ -95,6 +97,8 @@ AttributionResult {
 
 **已验证可用**：个股后复权（`stock_zh_a_daily` sina）、指数价格（`stock_zh_index_daily`）、交易日历、深市全市场改名、单标的改名、退市（沪深）、申万行业清单一/二/三级、申万**一级**成分股。
 **已验证不可用/受限**：eastmoney 全系（`stock_zh_a_hist`/`index_zh_a_hist`/`stock_zh_a_spot_em`）、baostock、沪深300全收益 H00300.CSI、申万**二/三级**成分股、`stock_info_a_code_name`（flaky）。
+>
+> 【2026-10-19 回写：申万二/三级成分股“不可用”已被 v3.0 的 tushare 申万三级方案推翻（见 [spike-results](./2026-06-30-spike-results.md) 顶部注记）；eastmoney/baostock 不可达结论仍成立。】
 **残余待定（实现期低风险）**：`--model` full-name/dated-id 最具体可用形式；`stock_info_a_code_name` 替代源。网络为外部依赖（eastmoney/baostock 不可达是环境约束，非 spec 缺陷）。
 
 ### 4.1 数据、窗口与事件日标准化
@@ -116,7 +120,7 @@ AttributionResult {
   - 良性场景自适应：N≥30 且 Shapiro-Wilk 不拒绝正态 且 平均截面相关 r̄<0.1 → 主推断改取 Adjusted BMP；
   - 池 N<5 → 统计量仅记录不披露；
   - 二者结论不一致 → 报告同时披露两 p 值并标"分歧"。
-  - **实现：GRANK 手写**（spike 确认 `event-study-toolkit` 不暴露可用 GRANK；按 Kolari-Pynnönen 原文 Table 2 实现调整因子 + 蒙特卡洛 size 检验）
+  - **实现：GRANK 手写**（spike 确认 `event-study-toolkit` 不暴露可用 GRANK；按 Kolari-Pynnönen 原文 Table 2 实现调整因子 + 蒙特卡洛 size 检验）【2026-10-19 回写：GRANK/Adjusted BMP 已在 `measurement/significance.py` 实现，但归因 `attribution.py` 仍用 scipy t 检验、`PoolStat.adj_bmp_*` 恒空、报告注“简化 t 检验”；组合推断尚未接入归因，见文末】
 - **单标的过滤（AttributionFiltering 第一段）**：经济显著性为主——**car_best = max|CAR| 跨 [0,+20]/[0,+60]/[0,+90] 任一窗口**（v3.0 改动：原仅看 +20，漏 late-bloomer；现 +20/+60/+90 任一窗口 ≥10%（主板）/ ≥20%（创科）即入池）；N<5 只用绝对阈值。组合统计量第二段算，仅辅证/披露
 - **不产出单标的 CAR 的 t 值**（对 σ 假设敏感、不可靠）
 
@@ -142,7 +146,7 @@ AttributionResult {
 
 ### 4.5 数据清洗（默认初值；结构固定）
 
-剔除事件日前上市不足 250 交易日新股（CandidateGen 即用此阈值）；thin trading（日均换手<0.1% **或** 零成交日>10%）→ 低置信；估计窗有效交易日<60 → 低置信；停牌日剔除（volume=0），事件窗缺失>20% → 低置信；ST 按事件期当时名称，估计窗内戴/摘帽 → 低置信；估计窗与已知重大事件重叠 → 标注污染；低置信标的保留进报告但不参与强弱排序；日线取不到 → 记 skip_log。
+剔除事件日前上市不足 250 交易日新股（CandidateGen 即用此阈值）；thin trading（日均换手<0.1% **或** 零成交日>10%）→ 低置信；估计窗有效交易日<60 → 低置信；停牌日剔除（volume=0），事件窗缺失>20% → 低置信【2026-10-19 回写：事件窗内停牌实际未打 `low_confidence`，仅剔除；见文末】；ST 按事件期当时名称，估计窗内戴/摘帽 → 低置信；估计窗与已知重大事件重叠 → 标注污染；低置信标的保留进报告但不参与强弱排序；日线取不到 → 记 skip_log。
 
 ### 4.6 EventEpisode（渐变事件）
 
@@ -163,6 +167,8 @@ eventreplay replay --from-file events/double-reduction.yaml
 # 产物：reports/<event-id>.md + 结构化数据入 SQLite + skip_log
 ```
 
+> 【2026-10-19 回写：`--episode-dates` / `--from-file` 未实现；replay 实际入口为 `--desc` + `--date`（多 episode 仅 schema + 度量支持，无 CLI 入口），见文末】
+
 ---
 
 ## 6. 种子事件集（5 个验收夹具）
@@ -176,6 +182,8 @@ eventreplay replay --from-file events/double-reduction.yaml
 | 5 | 新国九条 | 2024-04-12（盘后） | **2024-04-15** | 政策 | 红利/高股息（水电/煤炭/银行龙头）正超额；绩差小盘（主要 4-15/4-16）负 |
 
 > 代码为代表性示例（海光信息因 2022-08-12 上市、到 2023-01-30 不足 250 交易日会被 §4.5 剔除，故用中科曙光——注：产业链节点不同，spike 后据实选定同节点替代）；§4.0 spike 后固化为 `expected_beneficiary_set`/`expected_victim_set`（每方向 ≥5 只，可为空并声明）= 验收基线。
+>
+> 【2026-10-19 回写：5 个种子验收夹具文件 `tests/fixtures/seeds/*.yaml` 未落地；验收脚本在 `spikes/accept_5seeds.py`（spikes 共 39 个脚本 / 3,540 行），见文末】
 
 **验收标准（可机器判定）**：受益/受损池分别计 N，两池均须 `ceil(N×0.5)` 命中且 direction 一致（合取）；**某方向 `expected_*_set` 为空（单边事件，如 #4 受损池）→ 该方向不参与合取，降为另一方向 ceil(N×0.5) 命中**；命中 = 标的出现在受益/受损表且 direction 与预期一致（低置信/direction_conflict 标的进表、计入命中，仅分级列标"未分级/方向冲突"）；N=5 时 ceil=3。短窗系统性暴跌全负为合理，主断言落 [0,+20]/[0,+60] 方向。
 
@@ -198,7 +206,7 @@ eventreplay replay --from-file events/double-reduction.yaml
 
 ## 8. 编排与可复现
 
-轻量 Pipeline：节点图 + 每节点缓存 + 断点续跑。
+轻量 Pipeline：节点图 + 每节点缓存 + 断点续跑。【2026-10-19 回写：节点级缓存已实现且支持跨进程读写（`pipeline/node.py:84-145`）；重跑同一事件可跳过已完成节点（等效续跑），但无独立 resume 命令入口，见文末】
 - **缓存键**：`node_id + node_code_hash + inputs_hash + prompt_hash + model_alias + cli_version + cli_flags_hash`
 - **缓存有效边界**：量化节点（ImpactMeasurement）与首个推理节点缓存有效；推理→推理下游因 LLM 非确定性 cache 命中率被压制（断点续跑仍按 node_id 可用）
 - **可复现 = 可追溯（非确定性）**：CLI 不暴露 `--temperature`；记录 `pipeline_version`/`prompt_hash`/`model_alias`/`cli_version`；不承诺数值可复现。规律库（Phase2）固定 alias + cli_version
@@ -273,3 +281,22 @@ spec v2.5 已由 spike 实测奠基 → writing-plans 生成 Phase 1 实施计�
 - **ReportAssembly Python 模板兜底**（§3.2）：LLM 超时/失败 → `render_report()` 确定性生成（秒级，数据完整，无归纳叙述）
 - **`.env` 配置**：`ANTHROPIC_AUTH_TOKEN`/`TUSHARE_TOKEN`/`EVENTREPLAY_*` 默认值；python-dotenv 自动加载
 - **依赖新增**：`python-dotenv`、`pyyaml`、`tushare`
+
+---
+
+## 实现期状态回写（2026-10-19）
+
+> 本节为 Phase 1 实现完成后的回写；上文为 2026-06-30 设计（含 v2.5/v3.0 变更日志）与实现期迭代记录，未改写。
+
+- **落地情况**：7 节点流水线 + 影响度量引擎 + markdown 报告模板全部落地。代码规模：`src/eventreplay` 60 个 `.py` / 7,933 行；`tests` 32 个测试文件 / 6,646 行；`spikes` 39 个脚本 / 3,540 行。本地库 `data/eventreplay.db`（11.8MB，9 表）已累计：`events` 61、`chains` 61、`attribution_results` 61、`measurements` 2,746、`patterns` 58、`pipeline_runs` 525、`seen_events` 83、`skip_log` 673、`replays` 0。`reports/` 共 96 份 `.md` = **64 份复盘报告** + 22 份前瞻（`reports/` 顶层）+ 10 份监测（`monitoring/`），按报告首行标题判定，覆盖 2016–2026 年事件。
+- **CLI 实际 8 子命令**：`replay`、`extract-pattern`、`find-similar`、`refresh-sw`、`forward`、`mine-events`、`batch-replay`、`monitor`。
+- **未落地/偏离（已知）**：
+  - `--episode-dates` / `--from-file` 未实现；replay 入口为单事件 `--desc` + `--date`。多 episode 仅 schema + 度量支持，无 CLI 入口；
+  - Phase 1 计划承诺的 5 个种子验收夹具 `tests/fixtures/seeds/*.yaml` 未落地；验收脚本为 `spikes/accept_5seeds.py`；
+  - GRANK / Adjusted BMP 已在 `measurement/significance.py` 实现，但 `AttributionFiltering`（`attribution.py`）仍用 scipy t 检验——`PoolStat.adj_bmp_*` 恒为空、报告注“简化 t 检验”，§4.3 组合推断尚未接入归因；
+  - 跨进程续跑（§8）：节点级 SQLite 缓存读写已支持（`pipeline/node.py:84-145`，含类型重建），重跑同一事件可跳过已完成节点（等效续跑）；但无独立 resume 命令入口，且 `replays` 表当前为空使中断状态不可追溯；
+  - 事件窗内停牌未标 `low_confidence`（仅剔除）；
+  - 研究级方法（安慰剂检验、FF3/FF5、Dimson β、BHAR 显著性、AR(1) 半衰期等，§1.3 非目标）保持未做。
+- **口径更新**：成分股召回已由 **tushare 申万三级**（`refresh-sw` 预拉本地 + `ThemeIndex` curated 兜底 + LLM 提议 resolve 反查）实现；文中“申万成分股仅一级可用”为 v2.5 旧结论，已被 v3.0 取代。
+- **测试**：日常离线测试 `pytest --ignore=tests/test_real_smoke.py` → **342 passed / 8 skipped / 0 failed**（约 30s，纯离线；收尾新增 4 个回归测试，收尾前基线 338）；`tests/test_real_smoke.py` 为触网 + 真实 LLM 冒烟，不纳入日常验证。
+- **环境**：Python 3.10.10；`pyproject.toml` `requires-python >= 3.10`。

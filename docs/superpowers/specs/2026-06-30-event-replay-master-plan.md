@@ -1,6 +1,6 @@
 # EventAnalysis 总计划：重大事件复盘与前瞻映射系统
 
-- **状态**：已认可（待 Phase 1 细化）
+- **状态**：已实现（五阶段全部落地，2026-10-19 状态回写；偏差见 §10）
 - **日期**：2026-06-30
 - **文档层级**：程序级总计划（program-level）。各阶段各自再出独立 spec。
 
@@ -17,7 +17,7 @@
 | 事件范围 | **放眼全球**（国内政策、中美/地缘、商品、贸易、疫情、技术突破、海外宏观等） |
 | 数据来源 | 最佳实践：免费为主 + 轻量付费 + 抓取 + LLM 知识；数据适配器抽象可替换 |
 | 前瞻触发 | 全自动监测全球新闻 → 识别重大事件 → 推送 |
-| 技术栈 | Python 3.11+；LLM 经 **Claude Code CLI（headless）** 调用，基座模型可灵活调整 |
+| 技术栈 | Python 3.11+【2026-10-19 回写：实际为 Python 3.10.10，`pyproject.toml` 要求 `>=3.10`，见 §10 ③】；LLM 经 **Claude Code CLI（headless）** 调用，基座模型可灵活调整 |
 
 ---
 
@@ -43,7 +43,7 @@
 
 ## 2. 核心概念与全局数据模型
 
-统一定义跨阶段复用的实体（Phase 1 落地 schema）。**Phase 1 在此基础上扩展**：新增 `AttributionResult` 实体、`Event.episodes[]`/`EventEpisode`、`ImpactMeasurement` 细化字段（`episode_id`/`low_confidence`/`chain_node_id`/`direction`/`tier`/`rationale`/涨跌停聚合/持续性子字段）——**全局数据模型以 Phase 1 §2 schema 为准**，本表待 Phase 1 落地后回写。
+统一定义跨阶段复用的实体（Phase 1 落地 schema）。**Phase 1 在此基础上扩展**：新增 `AttributionResult` 实体、`Event.episodes[]`/`EventEpisode`、`ImpactMeasurement` 细化字段（`episode_id`/`low_confidence`/`chain_node_id`/`direction`/`tier`/`rationale`/涨跌停聚合/持续性子字段）——**全局数据模型以 Phase 1 §2 schema 为准**，本表待 Phase 1 落地后回写。【2026-10-19 回写：已完成——以 Phase 1 §2 schema 为准，`AttributionResult`/`EventEpisode`/`ImpactMeasurement` 细化字段均已落地，见 §10 ②】
 
 | 实体 | 关键字段 | 说明 |
 |---|---|---|
@@ -86,7 +86,7 @@
 
 - **事件日 t=0**：明确公告日；渐变事件取首次显著反应日或设事件窗
 - **估计窗 [t−120, t−21]**：拟合市场模型 `R_i = α + β·R_m + ε`
-  - 基准：默认沪深300全收益（H00300.CSI）；申万行业指数（akshare 仅价格指数）仅作行业暴露诊断；可切换。详见 Phase 1 §4.7
+  - 基准：默认沪深300全收益（H00300.CSI）；申万行业指数（akshare 仅价格指数）仅作行业暴露诊断；可切换。详见 Phase 1 §4.7【2026-10-19 回写：全收益不可得，实际主基准为沪深300价格指数 sh000300（Phase 1 §4.7），见 §10 ③】
 - **多事件窗**：[0,+1]（即时）、[0,+5]（短）、[0,+20]（中）、[0,+60]（长），对应"持续性"的多周期视角
 - **幅度指标**：各窗口 CAR（累计异常收益）、峰值 AR、涨停/跌停次数、最大回撤
 - **持续性指标**：长/短窗口 CAR 比（主）、显著 AR 持续天数、AAV 持续天数；A 股修正（涨跌停时点规则、组合显著性 KP GRANK 默认 + Adjusted BMP 对照、事件日标准化）与工程细节见 Phase 1 spec
@@ -135,6 +135,8 @@
 | **Phase 4 监测推送** | 全球新闻采集 → 事件抽取打分 → 自动触发 P3 → 推送 | P3 | 全自动闭环 |
 | **Phase 5 多市场** | 港股/美股行情与标的池 | P1 | 跨市场复盘 |
 
+> 【2026-10-19 回写：五阶段均已实现（Phase 0 按设计并入 Phase 1），实际交付与规模数据见 §10 ①。】
+>
 > **关于 Phase 0**：Phase 0 的必需基座（行情适配器 / 标的主数据 / 全局 schema / Claude CLI 封装 / 存储）**并入 Phase 1 一起实现，不单独成阶段交付**。原 Phase 0 设想中的新闻采集适配器（NewsAdapter）推迟到 Phase 4，独立产业链图谱库作为后期增强——避免过早建设当前用不上的东西（YAGNI）。
 
 **建设原则**：每阶段独立可用、为下一阶段铺路；每阶段各自走 spec → 计划 → 实现循环。
@@ -155,6 +157,8 @@
 | 编排 | 自写轻量 pipeline（节点图 + 缓存 + 续跑） | 后续可升 Prefect |
 | 调度/推送 | APScheduler + requests（企业微信/钉钉/邮件/webhook） | Phase 4 |
 | 测试 | pytest | 量化节点数值正确性 + 推理节点契约测试 |
+
+> 【2026-10-19 回写：实际技术栈见 §10 ③——Python 3.10.10；新闻源为 akshare+cctv+cls+jin10+jiuyan 融合；向量检索为 SQLite BLOB + 暴力 cosine（未用 Chroma/sqlite-vec）；embedding 为 auto 双后端（在线 2048 / 本地 512）。】
 
 ---
 
@@ -178,7 +182,7 @@
 | 模型版本漂移导致结果不可复现 | 每次 Replay 记录三版本（pipeline/prompt/model） |
 | 数据源配额/频控 | 适配器层限流 + 本地缓存 |
 | CLI 推理节点端到端成功率衰减（7 串联节点 ≈ p^7） | `--json-schema` + Pydantic + 修复式重试 + 明确降级语义；节点级缓存命中 |
-| akshare 历史数据可得性 / 退市停牌行为不一致 | 动工前数据可用性 spike；按 volume 判停牌；baostock fallback |
+| akshare 历史数据可得性 / 退市停牌行为不一致 | 动工前数据可用性 spike；按 volume 判停牌；baostock fallback【2026-10-19 回写：baostock 本环境不可达，未作 fallback，见 §10 ④】 |
 
 ---
 
@@ -192,3 +196,49 @@
   - pipeline 编排与缓存/续跑机制
   - 测试策略（量化节点数值测试 + 推理节点契约测试）
 - Phase 1 spec 完成后，调用 writing-plans skill 生成实施计划
+
+---
+
+## 10. 状态回写（2026-10-19）
+
+> 本节为五阶段实现完成后的全局回写；§0–§9 为 2026-06-30 的设计历史，未逐一改写。
+
+### ① 五阶段实现事实
+
+| 阶段 | 状态 | 实现事实（2026-10-19） |
+|---|---|---|
+| Phase 0 基座（并入 P1） | ✅ | sina QuoteAdapter / StockMaster / 全局 schema / Claude CLI 封装 / SQLite 存储均已落地 |
+| Phase 1 复盘 MVP | ✅ | 7 节点流水线 + 度量引擎（含 +90 窗口；GRANK/Adjusted BMP 有实现）+ 报告模板；已产出 64 份复盘报告、61 个 events |
+| Phase 2 规律库 | ✅ | Pattern schema + `extract-pattern` / `find-similar`；58 个 Pattern 入库（全部含五维定性 + embedding） |
+| Phase 3 前瞻映射 | ✅ | 三层降级 + 五维事前定性（§1.5）+ Forward 报告；已产出 22 份前瞻类报告（8 份 `fwd_*` 评估 + 14 份按日期命名的预判；最新 `reports/fwd_20261001_repo_outright.md`） |
+| Phase 4 监测/建库 | ✅ | `mine-events` / `batch-replay` / `monitor` 全链路；监测报告 10 份；事件打分实际 5 维；推送含飞书/企微/钉钉/文件 |
+| Phase 5 港股 | ✅ | 港股行情/主数据/HSI 基准/`--market 港股` 已实现并有单测（CLI 仅识别中文字面量“港股”，hk 别名未实现）；已产出 `reports/hk_tencent_dump.md` |
+
+- 代码与测试规模：`src/eventreplay` 60 个 `.py` / 7,933 行；`tests` 32 个测试文件 / 6,646 行；`spikes` 39 个脚本 / 3,540 行。
+- 离线测试：`pytest --ignore=tests/test_real_smoke.py` → **342 passed / 8 skipped / 0 failed**（约 30s，纯离线；收尾新增 4 个回归测试，收尾前基线 338）。
+- 数据库 `data/eventreplay.db`（11.8MB，9 表）：`events` 61、`chains` 61、`attribution_results` 61、`measurements` 2,746、`patterns` 58、`pipeline_runs` 525、`seen_events` 83、`skip_log` 673、`replays` 0。
+- 产物 `reports/` 96 份 `.md` = 64 份复盘 + 22 份前瞻（`reports/` 顶层）+ 10 份监测（`monitoring/`），按报告首行标题判定，覆盖 2016–2026；最新前瞻 `reports/fwd_20261001_repo_outright.md`（2026-10-01）。
+- CLI 实际 8 子命令：`replay`、`extract-pattern`、`find-similar`、`refresh-sw`、`forward`、`mine-events`、`batch-replay`、`monitor`。
+- Pattern 年份分布（58 个）：2016:10 / 2017:7 / 2018:3 / 2019:4 / 2020:4 / 2021:6 / 2022:7 / 2023:8 / 2024:4 / 2025:5；61 个 events 中 3 个无 Pattern（`china_japan_dualuse_2026`、`hk_tencent_dump`、`india_pakistan_2025`）。
+
+### ② 全局数据模型回写（补 §2 回写触发点）
+
+§2 所述“全局数据模型以 Phase 1 §2 schema 为准，待 Phase 1 落地后回写”已完成：`AttributionResult`（受益/受损池、`pool_stats`、`tier_definitions` / `industry_granularity`）、`EventEpisode`（`Event.episodes[]`，单事件恰 1 元素）、`ImpactMeasurement` 细化字段（`episode_id` / `low_confidence` / `chain_node_id` / `direction` / `tier` / `rationale` / 涨跌停聚合 / 持续性子字段）均已落地。Pattern 实体另增五维定性字段（见 §10 ① 与 Phase 2 spec 文末回写）。
+
+### ③ 技术栈实际（对 §7 / §0 表的回写）
+
+- **语言/运行时**：Python **3.10.10**；`pyproject.toml` `requires-python >= 3.10`（§7 写“3.11+”为设计期口径，已过时）。
+- **LLM**：经 **claude CLI**（`--bare --json-schema --output-format json` + Pydantic 校验 + 修复式重试），与设计一致。
+- **Embedding**：`EMBEDDING_BACKEND` 默认 **auto**——有 `ZHIPU_API_KEY` 且可达 → 智谱 `embedding-3`（2048 维）；否则本地 `bge-small-zh-v1.5`（512 维）；首次选定后锁定不切换（`cache/embedder_backend.txt`）。非设计期设想的固定网关口径。
+- **新闻源（实际）**：**akshare + cctv + cls（财联社）+ jin10（金十）+ jiuyan（韭研公社）融合**；原设计“forge_extension MCP + 财经 RSS/API”未按原样落地。
+- **存储/检索**：SQLite（`data/eventreplay.db`）+ BLOB 向量 + 暴力 cosine；未使用 Chroma / `sqlite-vec`。
+- **调度/推送**：**`while True + sleep` 单进程循环**（`pipeline/monitoring_pusher.py:22-41`；未使用 APScheduler，`pyproject.toml` 未引入该依赖）+ webhook（企微/钉钉/飞书）+ 本地文件。
+
+### ④ 已知未完成 / 简化（不阻塞当前使用）
+
+- **GRANK/Adjusted BMP 池级统计**：`measurement/significance.py` 已实现，但归因（`attribution.py`）仍用 scipy t 检验，`PoolStat.adj_bmp_*` 恒空、报告注“简化 t 检验”；
+- **跨进程续跑**：节点级 SQLite 缓存读写在后续迭代已补齐（`pipeline/node.py:84-145`，按 `output_type` 重建，`tests/test_fixes_regression.py` 覆盖），重跑同一事件可跳过已完成节点（等效续跑）；但无独立 resume 命令入口；
+- **多 episode 入口**：仅 schema + 度量支持，CLI 无 `--episode-dates` / `--from-file`；
+- **研究级方法**：安慰剂检验、FF3/FF5、Dimson β、BHAR 显著性等未做（原非目标）；
+- **市场与实时性**：美股、港股通南向、港股 GEM、港股衍生品未做；监测仍定时轮询（非实时 tick）；
+- **其他**：`calibrate_qualitative` 有实现有测试但未接入 forward 主链路；Phase 1 计划的 `tests/fixtures/seeds/*.yaml` 5 个种子夹具未落地（验收脚本在 `spikes/accept_5seeds.py`）。

@@ -1,6 +1,6 @@
 # Phase 1 实施计划：复盘 MVP
 
-- **状态**：**M0–M5 全部实现完成**（2026-06-30）。65 单测 passed + 1 skipped；组件级真实端到端验证通过（真实 claude 6 推理节点 + 真实 sina 行情 + 真实 StockMaster）。
+- **状态**：**M0–M5 全部实现完成**（2026-06-30）。65 单测 passed + 1 skipped；组件级真实端到端验证通过（真实 claude 6 推理节点 + 真实 sina 行情 + 真实 StockMaster）。**2026-10-19 回写：现状 342 passed/8 skipped（收尾新增 4 个回归测试）；实现期偏离见 §实现期偏离（含 5 种子夹具未落地、--episode-dates/--from-file 未实现、报告命名与计划不符）。**
 - **日期**：2026-06-30
 - **依据 spec**：[phase1-replay-mvp.md v2.5](../specs/2026-06-30-phase1-replay-mvp.md) · [spike-results](../specs/2026-06-30-spike-results.md) · [总计划](../specs/2026-06-30-event-replay-master-plan.md)
 - **方法**：TDD（量化节点测试先行）+ 增量集成 + 每里程碑可验证
@@ -224,6 +224,50 @@ M0.6（CLI 封装）可与 M1 并行（M1 不依赖 LLM）。M1 是纯量化、�
 1. **行业成分股不可得**（spike §6）：`index_component_sw` 对真实行业代码全 KeyError → CandidateGen 降级为"LLM 提议 + StockMaster.resolve 反查"（反幻觉护栏仍有效）。报告披露"行业覆盖依赖 LLM 召回 + 真实性校验"。
 2. **AttributionFiltering 实现为确定性量化节点**（非 LLM）：两段式过滤 + 强弱分级是规则化的算术，不需 LLM 推理；MVP 用确定性实现（更稳定、可测、零 LLM 成本）。
 3. **池级统计量简化**：spec §4.3 的 GRANK/Adjusted BMP 需 SAR 矩阵贯通全 pipeline；MVP 用"横截面 CAR[0,+20] t 检验"作辅证披露（已在 `tier_definitions.pool_stat_method` 标注）。完整 GRANK 留后续。
-4. **进程内缓存 vs 跨进程续跑**：`Node.run_cached` 命中进程内缓存（集成测试已验证同进程重跑命中）；SQLite 持久缓存为 write-only（Pydantic 类型对象的跨进程反序列化未实现，续跑留后续）。
+4. **进程内缓存 vs 跨进程续跑**：`Node.run_cached` 命中进程内缓存（集成测试已验证同进程重跑命中）；SQLite 持久缓存为 write-only（Pydantic 类型对象的跨进程反序列化未实现，续跑留后续）。【2026-10-19 回写：本条为 2026-06-30 时点状态；后续迭代已补 SQLite 缓存读路径与类型重建（`pipeline/node.py:84-145`，`tests/test_fixes_regression.py` 覆盖），重跑同一事件可等效续跑，但无独立 resume 命令入口，见下方「实现状态」】
 5. **事件窗停牌失真**（300010 双减案例）：K12 股在事件窗内停牌，清洗去 volume=0 日后窗口压缩、CAR 可能失真（如 300010 出现 +13% 异常）。当前未专门标 low_confidence；改进方向：检测事件窗内停牌占比→标低置信。
 6. **全量单事件真实 smoke 为慢速手动测试**（`tests/test_real_smoke.py`，需鉴权环境变量、~7-8min、6 次 claude 调用）。组件级真实验证已通过（LLM 节点 + impact 分别真实跑通）；GLM 网关对大 prompt（如 report 节点）偶发超时，重试即可。
+
+---
+
+## 实现状态（2026-10-19 回写）
+
+> 2026-10-19 对 Phase 1 落地情况逐里程碑复核。上方状态行与「实现期偏离与已知限制（M5 记录）」保留 2026-06-30 原记录；全局事实与偏离清单另见 [总计划 §10](../specs/2026-06-30-event-replay-master-plan.md)。
+
+### 逐里程碑结果
+
+| 里程碑 | 结果 | 落地证据（2026-10-19） |
+|---|---|---|
+| M0.1 项目脚手架 | **完成** | `pyproject.toml` 实际要求 Python `>=3.10`（运行环境 3.10.10）；`src/eventreplay` 60 个 `.py` / 7,933 行；`tests` 32 个测试文件 / 6,646 行；`spikes` 39 个脚本 / 3,540 行 |
+| M0.2 全局 schema | **完成** | `schema/event.py`（`Event`/`EventEpisode`）、`measurement.py`、`attribution.py`、`chain.py`、`replay.py` 全部落地；`Event.episodes` 单事件恰 1 元素（`schema/event.py:36-44`） |
+| M0.3 SQLite 存储层 | **完成** | `storage.py`；本地库 `data/eventreplay.db`（11.8MB，9 表） |
+| M0.4 QuoteAdapter | **完成** | `adapters/quote_adapter.py`（sina 主源 + 本地缓存 + tenacity 重试） |
+| M0.5 StockMaster | **完成（超越）** | `adapters/stock_master.py`；成分股召回源后续升级为 tushare 申万三级 + curated `ThemeIndex` 兜底 + LLM 提议 resolve 反查（`pipeline/orchestrator.py:28-35`、`:56-59`），强于计划的一级成分股底池 |
+| M0.6 Claude CLI 封装 | **完成** | `llm/reasoner.py`（`--bare` + `--json-schema` + Pydantic 校验 + 修复式重试）；环境 claude CLI 2.1.201 |
+| M1.1–M1.6 度量引擎 | **完成** | `measurement/`（市场模型、CAR 多窗口、显著 AR、AAV、涨跌停规则表、数据清洗）落地；窗口集另含 +90（`schema/measurement.py:32`，超出计划的窗口集合） |
+| M1.7 Adjusted BMP / M1.8 GRANK | **偏离（实现但未接线）** | `measurement/significance.py:56` adjusted_bmp、`:76` generalized_rank_z、`:108` choose_pool_stat 已实现并有测试；但归因主线仍用 scipy t 检验（`pipeline/nodes/attribution.py:56`），61 条 `attribution_results` 的 `PoolStat.adj_bmp_*` 恒为空，报告注「简化 t 检验」（`measurement/report_template.py:148,174`） |
+| M1.9 经济显著性/持续性 | **完成** | `measurement/significance.py:29-37`；`schema/measurement.py:45` persistence_ratio |
+| M1.10 度量节点封装 | **完成** | `pipeline/nodes/impact.py`；库内 `measurements` 2,746 行 |
+| M2.1 缓存 + 续跑 | **完成（口径更新）** | `pipeline/node.py:84-112`：进程内缓存 + SQLite 节点级持久缓存（读写均支持，按 `output_type` 重建），`pipeline_runs` 525 行。上方 M5 记录第 4 条「SQLite 持久缓存为 write-only」为当时状态，后续实现已补读路径；另未单独提供「续跑」命令入口 |
+| M2.2 版本记录 | **完成** | `pipeline_runs` 记录 node_id/cache_key/status（`storage.py:57-68`） |
+| M3.1–M3.6 六推理节点 | **完成** | 7 节点全部落地（`pipeline/nodes/ingest.py`、`chain.py`、`candidate.py`、`synthesis.py`、`report.py` + 确定性量化节点 `attribution.py`/`impact.py`）；AttributionFiltering 按 M5 记录第 2 条实现为确定性量化节点 |
+| M4.1 typer CLI | **部分偏离** | 实际入口 `replay --desc --date [--reaction-date] [--benchmark] [--event-id] [--model] [--market] [--db]`（`cli.py:92-102`）；**无 `--episode-dates` / `--from-file`**；报告命名实际为 `{日期}_{事件描述}.md`（`measurement/report_template.py:16-24`、`pipeline/orchestrator.py:179-181`），非计划的 `reports/<event-id>.md`，`--event-id` 只作事件 id 不改文件名 |
+| M4.2 端到端串联 | **完成** | `pipeline/orchestrator.py` 串 7 节点 + 报告落盘；已产出 64 份复盘报告（`reports/`，覆盖 2016–2026） |
+| M5.1 种子 fixture 固化 | **未做** | `tests/fixtures/seeds/*.yaml` 未落地；验收脚本在 `spikes/accept_5seeds.py` |
+| M5.2 端到端冒烟 | **部分完成** | 历史事件已真实跑通并入库（61 events，已产出 64 份复盘报告）；`tests/test_real_smoke.py`（真实 LLM 端到端）本轮未运行 |
+| M5.3 报告人工抽查 | **未做（本次复核）** | 报告模板与产物齐备，本轮未重新做人工抽查 |
+
+### 实现期偏离（2026-10-19 复核）
+
+1. **5 个种子验收夹具未落地**（M5.1）：`tests/fixtures/seeds/*.yaml` 不存在，验收逻辑改由 `spikes/accept_5seeds.py` 承载。
+2. **多 episode 无入口**（M4.1）：CLI 无 `--episode-dates` / `--from-file`，多 episode 仅 schema + 度量支持（`schema/event.py:36`、`pipeline/nodes/impact.py:31`），实际 replay 入口仍是单事件 `--desc` + `--date`。
+3. **报告命名与计划不符**（M4.1）：实际 `{日期}_{事件描述}.md`（`measurement/report_template.py:16-24`），计划写的是 `reports/<event-id>.md`。
+4. **组合统计量仍为简化 t 检验**（M1.7/M1.8）：GRANK / Adjusted BMP 有实现但未接入归因，`PoolStat.adj_bmp_*` 恒空；详见上文「实现期偏离与已知限制（M5 记录）」第 3 条与 [总计划 §10 ④](../specs/2026-06-30-event-replay-master-plan.md)。
+5. **`replays` 表 0 行**：可复现记录缺失，属存量数据重建遗留（历史事件经批量脚本重建，未走 replay 状态写入），不影响报告内容与规律库检索；不伪造回填。
+
+### 现状补充（2026-10-19）
+
+- 离线测试：`pytest --ignore=tests/test_real_smoke.py` → **342 passed / 8 skipped / 0 failed**（约 30s，纯离线；含收尾新增 4 个回归测试）；8 skip = 5 个真实网络 smoke + 2 个缺 `TUSHARE_TOKEN` + 1 个数据条件。
+- CLI 实际 8 子命令：`replay`、`extract-pattern`、`find-similar`、`refresh-sw`、`forward`、`mine-events`、`batch-replay`、`monitor`；`python -m eventreplay` 收尾前不可用，本次收尾补 `src/eventreplay/__main__.py`。
+- 数据与产物：`data/eventreplay.db`（11.8MB，9 表）`events` 61 / `chains` 61 / `attribution_results` 61 / `measurements` 2,746 / `patterns` 58 / `pipeline_runs` 525 / `seen_events` 83 / `skip_log` 673 / `replays` 0；`reports/` 96 份 `.md` = 64 复盘 + 22 前瞻 + 10 监测（按报告首行标题判定）。
+- 环境：Python 3.10.10；claude CLI 2.1.201；`.env` 9 键均非空；`.env.example` 曾缺 3 键（`EMBEDDING_BACKEND`/`FEISHU_WEBHOOK`/`MONITOR_INTERVAL`，本次回写补齐）。

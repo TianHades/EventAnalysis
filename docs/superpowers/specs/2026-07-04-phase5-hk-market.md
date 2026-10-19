@@ -1,6 +1,6 @@
 # Phase 5 Spec：港股市场接入（HK Market）
 
-- **状态**：设计完成，待用户审阅 → writing-plans
+- **状态**：已实现（2026-10-19 状态回写；设计与实现的偏离见文末）
 - **日期**：2026-07-04
 - **所属总计划**：[2026-06-30-event-replay-master-plan.md](./2026-06-30-event-replay-master-plan.md) 的 Phase 5
 - **依赖**：Phase 1（ReplayOrchestrator / QuoteAdapter / StockMaster / limits / measure_stock）；Phase 2/3（Pattern / Forward，复用）
@@ -20,7 +20,7 @@
 - ✅ **HKStockMaster**：港股主数据（stock_hk_spot 2787只 + stock_hk_company_profile_em 公司资料/行业/上市日）
 - ✅ **Board.HK_MAIN**：港股板块枚举 + limits 港股规则（无涨跌停）
 - ✅ **多市场路由**：Event/Stock 加 market 字段，pipeline 按 market 选 QuoteAdapter/StockMaster
-- ✅ **CLI --market hk**：replay/forward/mine-events/batch-replay 支持港股
+- ✅ **CLI --market hk**：replay/forward/mine-events/batch-replay 支持港股【2026-10-19 回写：实际 CLI 只接受 --market 港股】
 - ✅ 港股代码格式（5位，如 00700）+ to_hk_symbol 转换
 
 ### 1.3 非目标
@@ -171,6 +171,8 @@ eventreplay forward --desc "美联储降息港股受益" --date 2024-09-19 --mar
 # mine-events / batch-replay 也支持 --market hk（挖掘港股事件建库）
 ```
 
+> 【2026-10-19 回写：上述 CLI 示例中的 `--market hk` 实际只接受 `--market 港股`（CLI 仅识别中文字面量；hk 别名未实现，会静默落入 A 股分支）。】
+
 ---
 
 ## 7. 复用 vs 新增
@@ -225,3 +227,13 @@ eventreplay forward --desc "美联储降息港股受益" --date 2024-09-19 --mar
 - **港股通成分股用全量 spot 替代**：spike 确认东财 ggt 不可达；2787 只全量作标的池
 - **MVP 不限港股通南向**：YAGNI；假设全港股可交易，不限港股通名单
 - **规律库跨市场共用**：MVP 简化；Pattern 不区分市场（港股事件提炼的 Pattern 也可被 A 股 forward 检索，反之亦然）
+
+---
+
+## 实现期状态回写（2026-10-19）
+
+> 本节为 Phase 5 实现完成后的回写；上文为 2026-07-04 的设计历史，未改写。
+
+- **已实现并有单测**：港股行情（`stock_hk_daily` 后复权 + `stock_hk_index_daily_sina`）、港股主数据（`stock_hk_spot` + `stock_hk_company_profile_em`）、`Board.HK_MAIN` 无涨跌停、HSI/HSTECH 基准、`--market 港股` 多市场路由（CLI 仅识别中文字面量“港股”；hk 别名未实现，会静默落入 A 股分支）已实现并有单测覆盖；已产出港股复盘报告 `reports/hk_tencent_dump.md`（腾讯大股东减持事件；该事件未提炼 Pattern）。
+- **未做（维持原非目标）**：港股 GEM 创业板、港股通南向限制、港股衍生品/窝轮/牛熊证、美股均未接入；港股行情仍为日线（无实时 tick）。
+- **口径**：港股事件与 A 股共用同一 Pattern 库（原 §9“规律库跨市场”设计口径），未按市场分库。

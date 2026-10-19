@@ -1,10 +1,10 @@
 # Phase 2 Spec：规律库（Pattern Library）
 
-- **状态**：设计已自审修正，待用户复审 → writing-plans
+- **状态**：已实现（2026-10-19 状态回写；设计与实现的偏离见文末）
 - **日期**：2026-07-01
 - **所属总计划**：[2026-06-30-event-replay-master-plan.md](./2026-06-30-event-replay-master-plan.md) 的 Phase 2
 - **依赖**：Phase 1（复用 Reasoner / Storage / schema；需小补丁持久化 AttributionResult）
-- **关键决策**：① Pattern 提炼用 LLM 辅助综合（读 Replay 全产物）；② embedding 用 GLM 网关 `embedding-3`（spike 实跑 dim 2048 ✓）；③ 向量库 MVP 用 SQLite + 暴力 cosine（百级 Pattern 再升 sqlite-vec）；④ 每 Replay → 1 Pattern（不做聚类/合并，YAGNI）
+- **关键决策**：① Pattern 提炼用 LLM 辅助综合（读 Replay 全产物）；② embedding 用 GLM 网关 `embedding-3`（spike 实跑 dim 2048 ✓）【2026-10-19 回写：实际口径为 auto 双后端——有 `ZHIPU_API_KEY` 且可达则智谱 embedding-3（2048 维），否则本地 bge-small-zh-v1.5（512 维）；首次选定后锁定不切换（`cache/embedder_backend.txt`），见文末】；③ 向量库 MVP 用 SQLite + 暴力 cosine（百级 Pattern 再升 sqlite-vec）；④ 每 Replay → 1 Pattern（不做聚类/合并，YAGNI）
 
 ---
 
@@ -78,6 +78,8 @@ class Pattern(BaseModel):
 ```
 
 > 与总计划 §2 Pattern 实体一致并具象化；`embedding_text` 字段被 `event_summary` 承担。
+>
+> 【2026-10-19 回写：实现期 Pattern 另含五维定性 `PatternQualitative`（程度/范围/持续/显著/超预期），原 §3 未含该字段，属实现期扩展补记；见文末】
 
 ---
 
@@ -221,3 +223,14 @@ eventreplay find-similar --desc "某新事件描述" \
 - **暴力 cosine + BLOB**（非 sqlite-vec）：YAGNI；样本少时 O(N) 足够；留升级路径。
 - **观察单值非区间**（自审修正）：N=1 给不出区间，不臆造；区间待多 Replay 聚合。
 - **枚举过滤非 event_type**（自审修正）：event_type 自由词表不可靠，过滤用 shock_dimension/impact_direction 枚举。
+
+---
+
+## 实现期状态回写（2026-10-19）
+
+> 本节为 Phase 2 实现完成后的回写；上文为 2026-07-01 的设计历史，未改写。
+
+- **落地情况**：Pattern schema（`src/eventreplay/schema/pattern.py`，含 §3 全部字段）已落地；`extract-pattern` / `find-similar` 可用；本地库 `data/eventreplay.db` 已有 **58 个 Pattern** 入库（2016–2025 年事件，`created_at` 均为 2026-08-26，全部含五维定性与 embedding）。年份分布：2016:10 / 2017:7 / 2018:3 / 2019:4 / 2020:4 / 2021:6 / 2022:7 / 2023:8 / 2024:4 / 2025:5。61 个 events 中 3 个暂无 Pattern（`china_japan_dualuse_2026`、`hk_tencent_dump`、`india_pakistan_2025`）。
+- **Embedder 实际口径（偏离 §6 固定网关设想）**：`llm/embedder.py` 的 `EMBEDDING_BACKEND` 默认 `auto`——有 `ZHIPU_API_KEY` 且网关可达时走智谱 `embedding-3`（2048 维），否则回退本地 `bge-small-zh-v1.5`（512 维）；首次选定后锁定（`cache/embedder_backend.txt`）不切换，以保证同库向量维度一致。§6 的“固定网关 embedding-3”仅为在线分支口径。
+- **补记：Pattern 五维定性**：实现期新增 `PatternQualitative`（**程度 / 范围 / 持续 / 显著 / 超预期** 五维档位）随 Pattern 落库；原 §3 设计未包含，属实现期扩展（Phase 3 前瞻定性 + 盘后对账共用 `schema/pattern.py` 的 `QUALITATIVE_LABELS`）。
+- **未实现（维持原非目标）**：Pattern 聚类合并、跨 Replay 区间聚合、`sqlite-vec` 向量库均未做；检索仍为 SQLite + BLOB + 暴力 cosine（58 个 Pattern 规模下无压力）。

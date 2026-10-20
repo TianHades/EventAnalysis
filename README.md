@@ -9,16 +9,16 @@
 | **复盘** | `replay` | 事件 → 7 节点 pipeline（事件解析→产业链→标的圈定→CAR 度量→归因→传导链综合→报告） |
 | **规律库** | `extract-pattern` / `find-similar` | 从复盘提炼 Pattern（事件签名+传导模板+典型标的+5 维定性+向量），支持语义检索 |
 | **前瞻** | `forward` | 新事件 → 检索相似历史 Pattern → 预判受益/受损标的 + 预期 CAR + 历史定性对比 |
-| **监测** | `monitor` | 多源新闻采集 → LLM 事件抽取 → 阈值过滤 → 高分事件自动前瞻 → 飞书/企微推送 |
+| **监测** | `monitor` | 多源新闻采集 → LLM 事件抽取 → 阈值过滤 → 高分事件自动前瞻 → 飞书/企微推送；`--once` 单轮即退 |
 | **批量挖掘** | `mine-events` / `batch-replay` | LLM 多阶段列候选事件（`--start --end --top`）→ 人工审核 → 批量复盘 + Pattern 自动入库 |
-| **多市场（港股）** | `--market 港股` | 港股复用同一链路：`HKQuoteAdapter` + `HKStockMaster`，基准未显式指定时自动切 HSI，港股无涨跌停 |
+| **多市场（港股）** | `--market 港股` | 港股复用同一链路：`HKQuoteAdapter` + `HKStockMaster`，基准未显式指定时自动切 HSI，港股无涨跌停；也接受 `hk`/`hkex` 等别名 |
 | **申万缓存** | `refresh-sw` | 一次性预拉申万三级成分股到本地缓存，之后复盘零 tushare 网络调用 |
 
 > 当前覆盖 A 股（默认）与港股；美股 / 港股 GEM / 港股通未接入（见「已知限制」）。
 
 ## 规律库现状
 
-**58 个 Pattern**，覆盖 **2016-2025 十年**外部系统性冲击事件，全带 5 维定性标签（程度/范围/持续/显著/超预期）与 embedding 向量（58/58），Pattern 数据以 TEXT（JSON）持久化；数据库 measurements 共 **2,746** 条（events 61 / patterns 58 / pipeline_runs 525；replays 0，见「已知限制」）。
+**58 个 Pattern**，覆盖 **2016-2025 十年**外部系统性冲击事件，全带 5 维定性标签（程度/范围/持续/显著/超预期）与 embedding 向量（58/58），Pattern 数据以 TEXT（JSON）持久化；数据库 measurements 共 **2,746** 条（events 61 / patterns 58 / pipeline_runs 531；replays 0，见「已知限制」）。
 
 累计产出 **100 份报告**（2026-10-19 统计，含当日 monitor 实跑新增），覆盖 2016–2026（复盘、前瞻、监测三类产物；含港股复盘示例 `reports/hk_tencent_dump.md`）。
 
@@ -92,6 +92,8 @@ eventreplay replay --desc "腾讯大股东减持" --date 2023-01-25 --market 港
 
 产出：`reports/{日期}_{事件描述}.md` + 结构化数据入 SQLite。港股复用同一 7 节点链路（`HKQuoteAdapter` / `HKStockMaster`，港股无涨跌停），示例见 `reports/hk_tencent_dump.md`。
 
+> `--market` 接受 `A股`/`港股`，也接受 `a`、`cn`、`ashare`、`hk`、`hkex`、`hongkong` 等别名（大小写不敏感）；**未知值会直接报错退出**（不再静默按 A 股处理）。复盘/前瞻报告末尾统一附"研究用途，非投资建议"合规声明。
+
 ### 单事件规律提炼（Pattern）
 
 ```bash
@@ -122,9 +124,14 @@ eventreplay forward --desc "..." --date ... --market 港股
 # 默认：4 小时扫描 + 多源融合 + 飞书推送（读 .env）
 eventreplay monitor
 
+# 只跑一轮（采集→抽取→前瞻→推送）后退出：适合盘前定时任务/调试
+eventreplay monitor --once
+
 # 自定义
 eventreplay monitor --interval 60 --source multi --significance 3 --a-share 4 --surprise 3
 ```
+
+> 关闭推送（飞书/企微）用 `--feishu-webhook=` / 不传 `--push-webhook`；注意 **PowerShell 下不要写 `--feishu-webhook ""`**（空字符串会被吞成缺值，仍用 .env 默认值）。
 
 **触发条件**：significance ≥ 3（主线级）AND a_share ≥ 4（A 股可达）AND surprise ≥ 3（突发/超预期）。
 
@@ -193,6 +200,7 @@ pytest tests/test_real_smoke.py -v
 - source.lookup：申万三级 + 一级行业成分股匹配（tushare 权威 + curated ThemeIndex 兜底），最大化候选召回
 - 网络超时保护：tushare `_members` 与 akshare 调用均经 daemon 线程包装 + 60s 超时（`adapters/_net.py`）
 - 报告文件名：`{日期}_{事件描述}.md`（描述截断 30 字，可读；event_id 不影响报告路径）
+- 合规披露：复盘/前瞻报告末尾统一追加"研究用途，非投资建议"（`measurement/report_template.py` 的 `DISCLAIMER`）；飞书卡片底部同义备注
 
 ## 文档
 
@@ -216,7 +224,7 @@ pytest tests/test_real_smoke.py -v
 
 > 数据源用 sina（`stock_zh_a_daily` 等）；eastmoney/baostock 在开发环境不可达。LLM 推理节点经 Claude Code CLI（`--bare` 必须）。详见 spike-results。
 
-## 已知限制（2026-10-19）
+## 已知限制（2026-10-20）
 
 - **组合统计量未接入归因**：KP(2011) GRANK 与 KP(2010) Adjusted BMP 已在 `measurement/significance.py` 实现并有单测，但归因节点主链路仍用横截面 CAR[0,+20] t 检验（`tier_definitions.pool_stat_method` 标注简化），组合推断尚未接入。
 - **定性校准未接主链路**：`calibrate_qualitative`（五维定性事后对账）已实现，但 forward 链路只调用数值校准 `InitialCalibrationNode`，定性对账暂未接线。
@@ -224,4 +232,4 @@ pytest tests/test_real_smoke.py -v
 - **可复现记录缺失**：`replays` 表当前 0 条（events 61 / measurements 2,746 / patterns 58 有数据），历史复盘未回填 pipeline/prompt 版本与各节点产物。
 - **多市场仅港股**：美股、港股 GEM、港股通南向均未接入；`monitor` 监测链路固定 A 股。
 - **种子 fixture 未落地**：`tests/fixtures/seeds/` 的种子事件 yaml 未实现，单事件真实 smoke 仍为手动慢测（`tests/test_real_smoke.py`，需鉴权环境变量，约 7–8 分钟、6 次 claude 调用；2026-10-19 实跑通过，见「开发」）。
-- **报告未标注免责声明**：总计划要求输出标注"研究用途，非投资建议"，当前复盘/前瞻报告正文尚未标注（推送卡片仅有一句"前瞻预判 ≠ 确定结论"备注）。
+- **存量报告未回填免责声明**：2026-10-20 前的 100 份历史报告与 `report_assembly` 节点缓存不会自动补新声明（缓存键不含模板源码 hash），如需旧报告带上声明需清缓存重跑。

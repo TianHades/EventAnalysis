@@ -288,7 +288,7 @@ spec v2.5 已由 spike 实测奠基 → writing-plans 生成 Phase 1 实施计�
 
 > 本节为 Phase 1 实现完成后的回写；上文为 2026-06-30 设计（含 v2.5/v3.0 变更日志）与实现期迭代记录，未改写。
 
-- **落地情况**：7 节点流水线 + 影响度量引擎 + markdown 报告模板全部落地。代码规模：`src/eventreplay` 60 个 `.py` / 7,933 行；`tests` 32 个测试文件 / 6,646 行；`spikes` 39 个脚本 / 3,540 行。本地库 `data/eventreplay.db`（11.8MB，9 表）已累计：`events` 61、`chains` 61、`attribution_results` 61、`measurements` 2,746、`patterns` 58、`pipeline_runs` 531（跑前 525）、`seen_events` 107（跑前 83）、`skip_log` 673、`replays` 0。`reports/` 收尾时点 96 份 `.md` = **64 份复盘报告** + 22 份前瞻（`reports/` 顶层）+ 10 份监测（`monitoring/`），按报告首行标题判定，覆盖 2016–2026 年事件；2026-10-19 monitor 实跑后为 100 份（64 + 24 + 12）。
+- **落地情况**：7 节点流水线 + 影响度量引擎 + markdown 报告模板全部落地。代码规模：`src/eventreplay` 61 个 `.py` / 8,002 行；`tests` 35 个测试文件 / 7,159 行；`spikes` 39 个脚本 / 3,540 行。本地库 `data/eventreplay.db`（11.8MB，9 表）已累计：`events` 61、`chains` 61、`attribution_results` 61、`measurements` 2,746、`patterns` 58、`pipeline_runs` 531（跑前 525）、`seen_events` 107（跑前 83）、`skip_log` 673、`replays` 0。`reports/` 收尾时点 96 份 `.md` = **64 份复盘报告** + 22 份前瞻（`reports/` 顶层）+ 10 份监测（`monitoring/`），按报告首行标题判定，覆盖 2016–2026 年事件；2026-10-19 monitor 实跑后为 100 份（64 + 24 + 12）。
 - **CLI 实际 8 子命令**：`replay`、`extract-pattern`、`find-similar`、`refresh-sw`、`forward`、`mine-events`、`batch-replay`、`monitor`。
 - **未落地/偏离（已知）**：
   - `--episode-dates` / `--from-file` 未实现；replay 入口为单事件 `--desc` + `--date`。多 episode 仅 schema + 度量支持，无 CLI 入口；
@@ -298,5 +298,5 @@ spec v2.5 已由 spike 实测奠基 → writing-plans 生成 Phase 1 实施计�
   - 事件窗内停牌未标 `low_confidence`（仅剔除）；
   - 研究级方法（安慰剂检验、FF3/FF5、Dimson β、BHAR 显著性、AR(1) 半衰期等，§1.3 非目标）保持未做。
 - **口径更新**：成分股召回已由 **tushare 申万三级**（`refresh-sw` 预拉本地 + `ThemeIndex` curated 兜底 + LLM 提议 resolve 反查）实现；文中“申万成分股仅一级可用”为 v2.5 旧结论，已被 v3.0 取代。
-- **测试**：日常离线测试 `pytest --ignore=tests/test_real_smoke.py` → **342 passed / 8 skipped / 0 failed**（约 30s，纯离线；收尾新增 4 个回归测试，收尾前基线 338）；`tests/test_real_smoke.py` 为触网 + 真实 LLM 冒烟，不纳入日常验证（**2026-10-19 实跑通过：1 passed / 494.47s**，7/7 节点 done、31 条 measurements、报告 11,299 字，真实 sonnet 网关）。
+- **测试**：日常离线测试 `pytest --ignore=tests/test_real_smoke.py` → **365 passed / 8 skipped / 0 failed**（约 35s，纯离线；2026-10-19 收尾时 342，2026-10-20 新增 23 个回归测试）；`tests/test_real_smoke.py` 为触网 + 真实 LLM 冒烟，不纳入日常验证（**2026-10-19 实跑通过：1 passed / 494.47s**，7/7 节点 done、31 条 measurements、报告 11,299 字，真实 sonnet 网关）。
 - **环境**：Python 3.10.10；`pyproject.toml` `requires-python >= 3.10`。

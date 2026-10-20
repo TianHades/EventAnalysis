@@ -211,11 +211,11 @@
 | Phase 1 复盘 MVP | ✅ | 7 节点流水线 + 度量引擎（含 +90 窗口；GRANK/Adjusted BMP 有实现）+ 报告模板；已产出 64 份复盘报告、61 个 events |
 | Phase 2 规律库 | ✅ | Pattern schema + `extract-pattern` / `find-similar`；58 个 Pattern 入库（全部含五维定性 + embedding） |
 | Phase 3 前瞻映射 | ✅ | 三层降级 + 五维事前定性（§1.5）+ Forward 报告；已产出 24 份前瞻类报告（8 份 `fwd_*` 评估 + 16 份按日期命名的预判，其中 2 份由 2026-10-19 monitor 实跑触发；最新 `reports/fwd_20261001_repo_outright.md`） |
-| Phase 4 监测/建库 | ✅ | `mine-events` / `batch-replay` / `monitor` 全链路；监测报告 10 份；事件打分实际 5 维；推送含飞书/企微/钉钉/文件 |
-| Phase 5 港股 | ✅ | 港股行情/主数据/HSI 基准/`--market 港股` 已实现并有单测（CLI 仅识别中文字面量“港股”，hk 别名未实现）；已产出 `reports/hk_tencent_dump.md` |
+| Phase 4 监测/建库 | ✅ | `mine-events` / `batch-replay` / `monitor` 全链路；监测报告 12 份（跑前 10）；事件打分实际 5 维；推送含飞书/企微/钉钉/文件；`monitor --once` 支持单轮执行 |
+| Phase 5 港股 | ✅ | 港股行情/主数据/HSI 基准/`--market 港股` 已实现并有单测（也接受 hk/hkex 等别名，未知值报错）；已产出 `reports/hk_tencent_dump.md` |
 
-- 代码与测试规模：`src/eventreplay` 60 个 `.py` / 7,933 行；`tests` 32 个测试文件 / 6,646 行；`spikes` 39 个脚本 / 3,540 行。
-- 离线测试：`pytest --ignore=tests/test_real_smoke.py` → **342 passed / 8 skipped / 0 failed**（约 30s，纯离线；收尾新增 4 个回归测试，收尾前基线 338）。
+- 代码与测试规模：`src/eventreplay` 61 个 `.py` / 8,002 行；`tests` 35 个测试文件 / 7,159 行；`spikes` 39 个脚本 / 3,540 行。
+- 离线测试：`pytest --ignore=tests/test_real_smoke.py` → **365 passed / 8 skipped / 0 failed**（约 35s，纯离线；2026-10-19 收尾时 342，2026-10-20 新增 23 个回归测试）。
 - 数据库 `data/eventreplay.db`（11.8MB，9 表）：`events` 61、`chains` 61、`attribution_results` 61、`measurements` 2,746、`patterns` 58、`pipeline_runs` 531（跑前 525）、`seen_events` 107（跑前 83）、`skip_log` 673、`replays` 0。
 - 产物 `reports/` 100 份 `.md` = 64 份复盘 + 24 份前瞻（`reports/` 顶层）+ 12 份监测（`monitoring/`），按报告首行标题判定，覆盖 2016–2026；收尾时点为 96 = 64 + 22 + 10，另 4 份为 2026-10-19 monitor 实跑新增；最新前瞻 `reports/fwd_20261001_repo_outright.md`（2026-10-01）。
 - CLI 实际 8 子命令：`replay`、`extract-pattern`、`find-similar`、`refresh-sw`、`forward`、`mine-events`、`batch-replay`、`monitor`。

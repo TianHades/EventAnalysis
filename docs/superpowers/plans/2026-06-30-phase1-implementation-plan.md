@@ -1,6 +1,6 @@
 # Phase 1 实施计划：复盘 MVP
 
-- **状态**：**M0–M5 全部实现完成**（2026-06-30）。65 单测 passed + 1 skipped；组件级真实端到端验证通过（真实 claude 6 推理节点 + 真实 sina 行情 + 真实 StockMaster）。**2026-10-19 回写：现状 342 passed/8 skipped（收尾新增 4 个回归测试）；实现期偏离见 §实现期偏离（含 5 种子夹具未落地、--episode-dates/--from-file 未实现、报告命名与计划不符）。**
+- **状态**：**M0–M5 全部实现完成**（2026-06-30）。65 单测 passed + 1 skipped；组件级真实端到端验证通过（真实 claude 6 推理节点 + 真实 sina 行情 + 真实 StockMaster）。**2026-10-19 回写：现状 342 passed/8 skipped（2026-10-20 增量 23 个回归测试后为 365 passed/8 skipped）；实现期偏离见 §实现期偏离（含 5 种子夹具未落地、--episode-dates/--from-file 未实现、报告命名与计划不符）。**
 - **日期**：2026-06-30
 - **依据 spec**：[phase1-replay-mvp.md v2.5](../specs/2026-06-30-phase1-replay-mvp.md) · [spike-results](../specs/2026-06-30-spike-results.md) · [总计划](../specs/2026-06-30-event-replay-master-plan.md)
 - **方法**：TDD（量化节点测试先行）+ 增量集成 + 每里程碑可验证
@@ -267,7 +267,7 @@ M0.6（CLI 封装）可与 M1 并行（M1 不依赖 LLM）。M1 是纯量化、�
 
 ### 现状补充（2026-10-19）
 
-- 离线测试：`pytest --ignore=tests/test_real_smoke.py` → **342 passed / 8 skipped / 0 failed**（约 30s，纯离线；含收尾新增 4 个回归测试）；8 skip = 5 个真实网络 smoke + 2 个缺 `TUSHARE_TOKEN` + 1 个数据条件。
+- 离线测试：`pytest --ignore=tests/test_real_smoke.py` → **365 passed / 8 skipped / 0 failed**（约 35s，纯离线；2026-10-19 收尾时 342，2026-10-20 新增 23 个回归测试）；8 skip = 5 个真实网络 smoke + 2 个缺 `TUSHARE_TOKEN` + 1 个数据条件。
 - CLI 实际 8 子命令：`replay`、`extract-pattern`、`find-similar`、`refresh-sw`、`forward`、`mine-events`、`batch-replay`、`monitor`；`python -m eventreplay` 收尾前不可用，本次收尾补 `src/eventreplay/__main__.py`。
 - 数据与产物：`data/eventreplay.db`（11.8MB，9 表）`events` 61 / `chains` 61 / `attribution_results` 61 / `measurements` 2,746 / `patterns` 58 / `pipeline_runs` 525（2026-10-19 monitor 实跑后 531）/ `seen_events` 83（实跑后 107）/ `skip_log` 673 / `replays` 0；`reports/` 收尾时点 96 份 `.md` = 64 复盘 + 22 前瞻 + 10 监测（按报告首行标题判定），monitor 实跑后为 100 = 64 + 24 + 12。
 - 环境：Python 3.10.10；claude CLI 2.1.201；`.env` 9 键均非空；`.env.example` 曾缺 3 键（`EMBEDDING_BACKEND`/`FEISHU_WEBHOOK`/`MONITOR_INTERVAL`，本次回写补齐）。

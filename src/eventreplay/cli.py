@@ -70,13 +70,46 @@ def _require_enum(value: str | None, enum_cls, opt: str):
         raise typer.BadParameter(f"合法取值：{valid}", param_hint=opt)
 
 
+# --market 别名 → 规范中文值（hk/HK 等不再静默落入 A 股分支用错数据源）
+_MARKET_ALIASES = {
+    "a股": "A股",
+    "a": "A股",
+    "cn": "A股",
+    "ashare": "A股",
+    "a-share": "A股",
+    "港股": "港股",
+    "hk": "港股",
+    "hkex": "港股",
+    "hongkong": "港股",
+}
+_MARKET_VALID_HINT = "合法取值：A股（别名 a/cn/ashare）、港股（别名 hk/hkex/hongkong）"
+
+
+def normalize_market(raw: str | None) -> str:
+    """把 --market 原始值归一为规范中文值（A股/港股）；未命中别名抛 ValueError。"""
+    key = (raw or "").strip().lower()
+    try:
+        return _MARKET_ALIASES[key]
+    except KeyError:
+        raise ValueError(_MARKET_VALID_HINT) from None
+
+
+def _require_market(value: str) -> str:
+    """校验并归一 --market（非法值抛 typer.BadParameter，不静默落 A 股分支）。"""
+    try:
+        return normalize_market(value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--market") from None
+
+
 def make_adapters(market: str, benchmark: str | None = None):
     """按市场装配适配器 → (quote_adapter, stock_master, benchmark)。
 
     统一 replay/forward/batch-replay 三处"港股分支 + benchmark 切 HSI"的装配逻辑：
-    A股默认 sh000300；港股用 HK 适配器，benchmark 未显式指定（或仍是 A 股默认值）
-    时切 HSI。
+    入口先归一别名（hk/HK→港股），A股默认 sh000300；港股用 HK 适配器，
+    benchmark 未显式指定（或仍是 A 股默认值）时切 HSI。
     """
+    market = normalize_market(market)  # 防御库内调用：别名与 CLI 口径一致
     if market == "港股":
         from .adapters.hk_quote_adapter import HKQuoteAdapter
         from .adapters.hk_stock_master import HKStockMaster
@@ -97,10 +130,11 @@ def replay(
     benchmark: str = typer.Option(_DEFAULT_BENCHMARK, "--benchmark", help="基准指数（A股 sh000300 / 港股 HSI）"),
     event_id: str = typer.Option("evt", "--event-id", help="事件 id（报告文件名）"),
     model: str = typer.Option(_DEFAULT_MODEL, "--model", help="Claude 模型别名"),
-    market: str = typer.Option("A股", "--market", help="A股/港股"),
+    market: str = typer.Option("A股", "--market", help="A股（默认）/港股；也可用 hk 等别名"),
     db: str = typer.Option(_DEFAULT_DB, "--db", help="SQLite 路径"),
 ) -> None:
     """Phase 1：对单个历史事件跑完整复盘流水线。"""
+    market = _require_market(market)  # 非法/别名先归一，再构造 LLM 与适配器
     date = _require_iso_date(date, "--date")
     if reaction_date is not None:
         reaction_date = _require_iso_date(reaction_date, "--reaction-date")
@@ -204,11 +238,12 @@ def forward(
     top_k: int = typer.Option(3, "--top-k", help="检索相似 Pattern 数"),
     event_id: str = typer.Option("forward", "--event-id", help="事件 id（报告文件名）"),
     model: str = typer.Option(_DEFAULT_MODEL, "--model", help="Claude 模型别名"),
-    market: str = typer.Option("A股", "--market", help="A股/港股"),
+    market: str = typer.Option("A股", "--market", help="A股（默认）/港股；也可用 hk 等别名"),
     db: str = typer.Option(_DEFAULT_DB, "--db", help="SQLite 路径"),
     feishu: str | None = typer.Option(_DEFAULT_FEISHU, "--feishu-webhook", help="飞书 webhook URL（默认读 .env FEISHU_WEBHOOK）"),
 ) -> None:
     """Phase 3：前瞻映射——检索相似历史 Pattern，预判受益/受损标的 + 预期 CAR 区间。"""
+    market = _require_market(market)  # 非法/别名先归一，再构造 LLM 与适配器
     date = _require_iso_date(date, "--date")
     if mode not in ("pre", "post"):
         raise typer.BadParameter("合法取值：pre（盘前前瞻）、post（盘后校准）", param_hint="--mode")
@@ -239,10 +274,11 @@ def mine_events(
     top_n: int = typer.Option(5, "--top", help="最终选取数（默认5）"),
     raw_top: int = typer.Option(20, "--raw-top", help="阶段1广撒网候选数"),
     model: str = typer.Option(_DEFAULT_MODEL, "--model", help="Claude 模型别名"),
-    market: str = typer.Option("A股", "--market", help="A股/港股"),
+    market: str = typer.Option("A股", "--market", help="A股（默认）/港股；也可用 hk 等别名"),
     db: str = typer.Option(_DEFAULT_DB, "--db", help="SQLite 路径"),
 ) -> None:
     """Phase 4 功能2：多阶段挖掘候选事件（LLM列候选→硬过滤→LLM评估），筛选过程可追溯。"""
+    market = _require_market(market)  # 非法/别名先归一，再构造 LLM 与 Storage
     typer.echo(f"[mine-events] {start}~{end} market={market} top={top_n} raw_top={raw_top}")
     reasoner = ClaudeCodeProvider(model_alias=model)
     storage = Storage(db)
@@ -271,11 +307,12 @@ def batch_replay(
     job_file: str = typer.Option(..., "--job-file", help="mining_candidates json 文件"),
     model: str = typer.Option(_DEFAULT_MODEL, "--model", help="Claude 模型别名"),
     benchmark: str = typer.Option(_DEFAULT_BENCHMARK, "--benchmark"),
-    market: str = typer.Option("A股", "--market", help="A股/港股"),
+    market: str = typer.Option("A股", "--market", help="A股（默认）/港股；也可用 hk 等别名"),
     db: str = typer.Option(_DEFAULT_DB, "--db"),
     sleep: float = typer.Option(0.0, "--sleep", help="每个 replay 间隔秒（限流）"),
 ) -> None:
     """Phase 4 功能2：批量 replay + extract-pattern 建库。"""
+    market = _require_market(market)  # 非法/别名先归一，再构造 LLM 与适配器
     from .pipeline.batch_replay import BatchReplayRunner, read_candidates
     from .pipeline.event_dedup import EventDedup
 
@@ -307,6 +344,7 @@ def monitor(
     source: str = typer.Option("multi", "--source", help="akshare/jiuyan/cctv/cls/jin10/multi"),
     model: str = typer.Option("haiku", "--model", help="Claude 模型别名（默认 haiku，forward_mapping sonnet 网关超时）"),
     screen: bool = typer.Option(True, "--screen/--no-screen", help="两级漏斗：先批量初筛再细评（默认开，--no-screen 回到逐条细评）"),
+    once: bool = typer.Option(False, "--once", help="只跑一轮（采集→抽取→前瞻→推送）后退出；默认常驻循环"),
     db: str = typer.Option(_DEFAULT_DB, "--db"),
 ) -> None:
     """Phase 4 功能1：定时监测新闻 → 高分事件 forward → 推送。"""
@@ -354,16 +392,15 @@ def monitor(
     )
     try:
         # 主循环体整体兜底：单轮任何异常 echo 后继续 sleep（监控的核心要求是持续运行）
-        run_monitor_loop(
-            pusher,
-            interval_min=interval_min,
-            echo=typer.echo,
-            significance_min=significance,
-            a_share_min=a_share,
-            surprise_min=surprise,
-            impact_min=impact,
-            screen=screen,
+        run_kwargs = dict(
+            significance_min=significance, a_share_min=a_share,
+            surprise_min=surprise, impact_min=impact, screen=screen,
         )
+        if once:
+            n = pusher.run_once(echo=typer.echo, **run_kwargs)
+            typer.echo(f"[monitor] --once 单轮完成，推送 {n} 条")
+        else:
+            run_monitor_loop(pusher, interval_min=interval_min, echo=typer.echo, **run_kwargs)
     except KeyboardInterrupt:
         typer.echo("[monitor] stopped")
 

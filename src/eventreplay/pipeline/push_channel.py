@@ -98,10 +98,14 @@ def _md_to_feishu_card(title: str, markdown: str) -> dict:
         if i < len(sections) - 1:
             elements.append({"tag": "hr"})
 
-    # 底部备注（前瞻免责声明）
+    # 底部备注（前瞻免责声明 + 合规披露）
+    note_text = (
+        "研究用途，非投资建议 ｜ ⚠️ 前瞻预判 ≠ 确定结论，"
+        "历史不一定重演 | EventAnalysis"
+    )
     elements.append({
         "tag": "note",
-        "elements": [{"tag": "plain_text", "content": "⚠️ 前瞻预判 ≠ 确定结论，历史不一定重演 | EventAnalysis"}],
+        "elements": [{"tag": "plain_text", "content": note_text}],
     })
 
     # 卡片配色（按方向选色）

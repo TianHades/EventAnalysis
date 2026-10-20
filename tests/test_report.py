@@ -7,6 +7,7 @@
 from datetime import date
 
 from eventreplay.llm import LLMNodeFailed
+from eventreplay.measurement.report_template import DISCLAIMER, render_report
 from eventreplay.pipeline.nodes.report import ReportNode
 from eventreplay.schema import AttributionResult, Event, TransmissionChain
 
@@ -79,3 +80,36 @@ def test_report_prompt_hash_changes_on_prompt_edit():
     finally:
         node.system_prompt = orig  # type: ignore[assignment]
     assert h1 != h2, "system_prompt 变化应使 prompt_hash 改变（触发缓存重算）"
+
+
+# ---- 合规披露（2026-10-19 冒烟补缺）：研究用途，非投资建议 ----
+
+
+def test_render_report_disclaimer_appended():
+    """render_report（模板出口）末尾统一追加全项目唯一来源的 DISCLAIMER。"""
+    md = render_report(
+        event=Event(
+            id="e",
+            description="测试事件",
+            announcement_date=date(2021, 1, 1),
+            reaction_date=date(2021, 1, 1),
+            event_type="政策",
+        ),
+        chain=TransmissionChain(event_id="e"),
+        attribution=AttributionResult(),
+        measurements=[],
+    )
+    assert DISCLAIMER in md
+    assert "研究用途，非投资建议" in md
+    assert "非投资建议" in md[-300:]  # 位于文档末尾
+    assert md.rstrip().endswith(DISCLAIMER), "免责声明应位于报告文档最末"
+
+
+def test_report_disclaimer_at_end_both_llm_paths():
+    """LLM 成功路径与模板兜底路径（均经 render_report）的报告末尾都有免责声明。"""
+    llm_md = ReportNode(_TextReasoner()).run(_inputs())
+    fallback_md = ReportNode(_TextReasoner(fail=True)).run(_inputs())
+    for md in (llm_md, fallback_md):
+        assert "研究用途，非投资建议" in md
+        assert "非投资建议" in md[-300:]
+        assert md.rstrip().endswith(DISCLAIMER), "免责声明应位于报告文档最末"

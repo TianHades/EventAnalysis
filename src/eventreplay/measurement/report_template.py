@@ -8,6 +8,12 @@ from __future__ import annotations
 
 from ..schema import AttributionResult, Event, ImpactMeasurement, TransmissionChain
 
+# 合规披露（全项目唯一来源）：复盘/前瞻报告正文末尾统一追加，推送卡片底部备注同义改写。
+DISCLAIMER = (
+    "> **研究用途，非投资建议**：本报告由 EventAnalysis 自动生成，仅供研究参考，"
+    "不构成任何投资建议；历史规律不代表未来表现，数据可能存在延迟或误差。"
+)
+
 
 def _fmt(v: float | None) -> str:
     return f"{v:+.1%}" if v is not None else "-"
@@ -179,4 +185,8 @@ def render_report(
     if troughs:  # 有谷值数据时峰值/谷值都展示（受损标的看谷值）
         p_txt = f"{max(peaks):+.1%}" if peaks else "-"
         lines.append(f"- 事件窗 AR 峰值/谷值（全池极值）：峰值最高 {p_txt}，谷值最低 {min(troughs):+.1%}")
+
+    # 合规披露：复盘报告唯一出口（LLM 成功路径与模板兜底路径都经 render_report）→ 末尾统一追加
+    lines.append("")
+    lines.append(DISCLAIMER)
     return "\n".join(lines)

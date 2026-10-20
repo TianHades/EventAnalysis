@@ -7,6 +7,7 @@ from pathlib import Path
 from ..adapters.quote_adapter import AkshareQuoteAdapter
 from ..adapters.stock_master import StockMaster
 from ..llm import Reasoner
+from ..measurement.report_template import DISCLAIMER
 from ..pipeline.nodes.calibration import InitialCalibrationNode
 from ..pipeline.nodes.forward_mapping import ForwardMappingNode
 from ..pipeline.nodes.qualitative_forecast import ANCHOR_TARGETS, QualitativeForecastNode
@@ -370,5 +371,9 @@ class ForwardOrchestrator:
             lines.append("- 无相似历史 Pattern（相似度低于阈值），纯定性推理")
         if result.mode == "post":
             lines.append("- 盘后校准仅 [+1]/[+5] 初始信号，不等于最终验证")
+
+        # 合规披露：前瞻报告是 CLI forward 与 monitor 自动 forward 的共同产物 → 末尾统一追加
+        lines.append("")
+        lines.append(DISCLAIMER)
 
         return "\n".join(lines)

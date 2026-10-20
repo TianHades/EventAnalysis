@@ -13,6 +13,7 @@ import pandas as pd
 
 from eventreplay.adapters.stock_master import ResolvedStock
 from eventreplay.llm import LLMNodeFailed
+from eventreplay.measurement.report_template import DISCLAIMER
 from eventreplay.pipeline.forward_orchestrator import ForwardOrchestrator
 from eventreplay.pipeline.nodes.candidate import _CandOut, _CandsOut
 from eventreplay.pipeline.nodes.chain import _ChainNodeOut, _ChainOut
@@ -357,3 +358,22 @@ def test_forward_report_renders_none_fields_safely(tmp_path):
     md = orch._generate_report(result)
     assert "—" in md  # None 渲染为占位符而非崩溃
     assert "None" not in md.replace("stock_name=None", "")  # 不出现裸 None 字样
+
+
+# ---- 合规披露（2026-10-19 冒烟补缺）：研究用途，非投资建议 ----
+
+
+def test_forward_report_disclaimer_at_end(tmp_path):
+    """_generate_report（前瞻报告唯一出口）末尾统一追加全项目唯一来源的 DISCLAIMER。"""
+    from eventreplay.schema import ForwardResult
+
+    orch = _orch(tmp_path, [])
+    event = Event(
+        id="e", description="测试事件", announcement_date=date(2026, 7, 15),
+        reaction_date=date(2026, 7, 15), event_type="政策",
+    )
+    md = orch._generate_report(ForwardResult(event_id="x", event=event))
+    assert DISCLAIMER in md
+    assert "研究用途，非投资建议" in md
+    assert "非投资建议" in md[-300:]  # 位于文档末尾
+    assert md.rstrip().endswith(DISCLAIMER), "免责声明应位于前瞻报告文档最末"

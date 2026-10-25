@@ -45,6 +45,30 @@ pip install -e ".[dev]"
 
 安装后 `eventreplay <子命令>` 即 console script；也可用 `python -m eventreplay <子命令>`（同一入口，效果等价；未安装时可用 `PYTHONPATH=src python -m eventreplay ...`）。
 
+## 新设备部署（git clone 后）
+
+仓库自带规律库静态快照 `seed/eventreplay.db`（58 Pattern / 2,746 measurements / 61 events，2026-10-19 时点）和主题召回索引 `data/themes.yaml`；本地运行库 `data/eventreplay.db`、`cache/` 与顶层 `reports/*.md` 不入 git（`reports/monitoring/` 历史归档已入库）。
+
+```bash
+# 1) 安装（Python 3.10+；Claude Code CLI 需在 PATH）
+pip install -e ".[dev]"
+
+# 2) 配置 .env：复制 .env.example 后填写 9 个键
+#    注意 EMBEDDING_BACKEND=local —— 库内 embedding 为本地 bge-small-zh-v1.5(512 维)；
+#    若锁成智谱 2048 维，相似检索会全部 0 分、forward 退化为纯定性推理
+cp .env.example .env          # Windows: Copy-Item .env.example .env
+
+# 3) 灌入规律库 seed（已有 data/eventreplay.db 时跳过；-Force 覆盖）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
+# 或手动：New-Item -ItemType Directory -Force data | Out-Null; Copy-Item seed\eventreplay.db data\eventreplay.db
+
+# 4) 验收
+eventreplay find-similar --desc "美联储加息" --top-k 3   # 应返回 3 条 Pattern
+pytest --ignore=tests/test_real_smoke.py                 # 离线全量测试
+```
+
+依赖：Python 3.10+、Claude Code CLI（`claude -p --bare`）、首次 embed 会下载本地模型 `BAAI/bge-small-zh-v1.5`（走 HF mirror，需网络）。规律库更新（主力设备）：`Copy-Item data/eventreplay.db seed/eventreplay.db` → 提交 `seed/eventreplay.db`；运行产物继续留在本地不入库。
+
 ## 配置
 
 复制 [.env.example](.env.example) 为 `.env` 并填写（共 9 个键）：

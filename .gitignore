@@ -22,7 +22,11 @@ reports/*.md
 *.db
 *.sqlite
 *.sqlite3
-data/
+# 规律库 seed：静态快照，clone 后由 scripts/bootstrap.ps1 灌入 data/eventreplay.db
+!seed/eventreplay.db
+# 运行数据目录：默认忽略产物，只白名单 curated 主题召回索引（小文本）
+data/*
+!data/themes.yaml
 cache/
 
 # OS

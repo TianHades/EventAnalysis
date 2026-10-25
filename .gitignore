@@ -28,6 +28,10 @@ reports/*.md
 data/*
 !data/themes.yaml
 cache/
+logs/
+
+# 本机运维脚本与配置（定时任务包装脚本、本机说明等，不入库）
+local/
 
 # OS
 .DS_Store

@@ -15,6 +15,12 @@ from typing import Protocol
 import pandas as pd
 
 from ..schema.news import NewsItem
+from ._net import call_with_timeout
+
+# akshare 新闻接口内部 requests 无库级超时，偶发挂起会卡死定时任务整轮（实测
+# stock_info_global_cls 在部分网络下 >40s 不返回）。统一用 daemon 线程超时包装，
+# 超时抛 TimeoutError → 各 adapter 既有的 except Exception 降级为空列表。
+_NEWS_FETCH_TIMEOUT_S = 45
 
 
 class NewsAdapter(Protocol):
@@ -35,7 +41,7 @@ class AkshareNewsAdapter:
         import akshare as ak
 
         try:
-            df = ak.stock_news_main_cx()
+            df = call_with_timeout(ak.stock_news_main_cx, {}, timeout=_NEWS_FETCH_TIMEOUT_S)
         except Exception:
             return []
         out: list[NewsItem] = []
@@ -55,7 +61,9 @@ class AkshareNewsAdapter:
         import akshare as ak
 
         try:
-            df = ak.news_cctv(date=d.strftime("%Y%m%d"))
+            df = call_with_timeout(
+                ak.news_cctv, {"date": d.strftime("%Y%m%d")}, timeout=_NEWS_FETCH_TIMEOUT_S
+            )
         except Exception:
             return []
         out: list[NewsItem] = []
@@ -153,7 +161,9 @@ class CCTVNewsAdapter:
         import akshare as ak
 
         try:
-            df = ak.news_cctv(date=d.strftime("%Y%m%d"))
+            df = call_with_timeout(
+                ak.news_cctv, {"date": d.strftime("%Y%m%d")}, timeout=_NEWS_FETCH_TIMEOUT_S
+            )
         except Exception:
             return []
         out: list[NewsItem] = []
@@ -187,7 +197,9 @@ class CLSNewsAdapter:
         import akshare as ak
 
         try:
-            df = ak.stock_info_global_cls(symbol="全部")
+            df = call_with_timeout(
+                ak.stock_info_global_cls, {"symbol": "全部"}, timeout=_NEWS_FETCH_TIMEOUT_S
+            )
         except Exception:
             return []
         out: list[NewsItem] = []

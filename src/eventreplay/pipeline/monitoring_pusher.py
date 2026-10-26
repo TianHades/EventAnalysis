@@ -1,4 +1,8 @@
-"""MonitoringPusher：采集 → 初筛 → 抽取 → 高分 forward → 推送（Phase 4 功能1）。"""
+"""MonitoringPusher：采集 → 初筛 → 抽取 → 高分 forward → 推送（Phase 4 功能1）。
+
+无事件达到前瞻阈值时，向实时渠道推一条「本轮最高分事件」摘要（心跳），避免整天静默；
+摘要只走实时渠道、不标记 seen，不影响后续对同一事件的前瞻/推送重试。
+"""
 
 from __future__ import annotations
 
@@ -140,6 +144,7 @@ class MonitoringPusher:
             echo(f"[monitor] 近期上下文：{recent_ctx[:80]}...")
 
         pushed = 0
+        triggered = False  # 是否有事件通过分数阈值（决定本轮「无触发摘要」是否发送）
         # 记录本轮所有识别到的事件（供无触发时摘要 + 上下文累积）
         all_cands: list = []
         for cand in self._extract_all(survivors, recent_ctx, echo):
@@ -158,6 +163,7 @@ class MonitoringPusher:
                     continue  # 突发性/超预期性不足（预期内事件可能"利好出尽"）
             if impact_min > 0 and cand.impact_scale < impact_min:
                 continue  # 影响规模不足
+            triggered = True  # 通过分数阈值（不论后续是否已推送/forward 成败，都算本轮有触发）
             if self.dedup.is_seen(cand.dedup_key, purpose="push"):
                 continue  # 已推送/已处理
             try:
@@ -199,15 +205,124 @@ class MonitoringPusher:
             else:
                 echo(f"[monitor] 推送全失败 {cand.event.description[:30]}，不标记 seen，下次重试")
 
-        # 无高分事件触发 → 输出本轮最重要事件摘要
-        if pushed == 0 and all_cands:
-            top = max(all_cands, key=lambda c: (c.significance, c.a_share_relevance, c.impact_scale))
-            echo(
-                f"[monitor] 本轮无触发前瞻的事件（阈值 sig>={significance_min} a>={a_share_min} "
-                f"surprise>={surprise_min}）。"
-                f"最高分事件：sig={top.significance} a={top.a_share_relevance} "
-                f"imp={top.impact_scale} | {top.event.description[:50]}"
+        # 无高分事件触发 → 输出并推送「本轮相对最有价值事件」摘要（心跳，避免整天静默）
+        if pushed == 0 and not triggered:
+            top = (
+                max(all_cands, key=lambda c: (c.significance, c.a_share_relevance, c.impact_scale))
+                if all_cands
+                else None
+            )
+            if top is not None:
+                echo(
+                    f"[monitor] 本轮无触发前瞻的事件（阈值 sig>={significance_min} "
+                    f"a>={a_share_min} surprise>={surprise_min}）。"
+                    f"最高分事件：sig={top.significance} a={top.a_share_relevance} "
+                    f"imp={top.impact_scale} | {top.event.description[:50]}"
+                )
+            self._push_round_summary(
+                top=top,
+                cands=all_cands,
+                collected_n=len(items),
+                screened_n=len(survivors),
+                significance_min=significance_min,
+                a_share_min=a_share_min,
+                surprise_min=surprise_min,
+                echo=echo,
             )
 
         echo(f"[monitor] 本次推送 {pushed} 条（共识别 {len(all_cands)} 个事件）")
         return pushed
+
+    def _round_summary_markdown(
+        self,
+        top,
+        cands: list,
+        *,
+        collected_n: int,
+        screened_n: int,
+        significance_min: int,
+        a_share_min: int,
+        surprise_min: float,
+    ) -> tuple[str, str]:
+        """构造「本轮无触发」摘要的 (标题, markdown)；top=None 表示本轮没识别出事件。"""
+        funnel = (
+            f"- 采集 **{collected_n}** 条新闻 → 初筛 **{screened_n}** 条 → "
+            f"识别 **{len(cands)}** 个事件\n"
+            f"- 前瞻触发阈值：重大性 ≥{significance_min} 且 A股可达 ≥{a_share_min} 且 "
+            f"超预期均值 ≥{surprise_min:g}（本轮未同时满足）\n"
+        )
+        if top is None:
+            return (
+                f"【本轮无触发】未识别出重大事件（采集 {collected_n} 条）",
+                "## 本轮无触发前瞻事件\n\n"
+                + funnel
+                + "\n本轮识别到的新闻均为噪音/非事件；监测照常运行，下一轮继续。\n",
+            )
+        dim = getattr(top.event.shock_dimension, "value", top.event.shock_dimension) or "—"
+        direction = getattr(top.event.impact_direction, "value", top.event.impact_direction) or "—"
+        body = (
+            "## 本轮无触发前瞻事件\n\n"
+            + funnel
+            + "\n## 本轮相对最有价值事件\n\n"
+            + f"- **事件**：{top.event.description[:160]}\n"
+            + f"- **类型 / 维度 / 方向**：{top.event.event_type or '—'} / {dim} / {direction}\n"
+            + f"- **评分**：重大性 **{top.significance}**/4 ｜ "
+            f"A股可达 **{top.a_share_relevance}**/5 ｜ 突发 **{top.surprise_timing}**/5 ｜ "
+            f"超预期 **{top.surprise_magnitude}**/5 ｜ 影响 **{top.impact_scale}**/5\n"
+            + f"- **事件日期**：{top.event.reaction_date}\n"
+        )
+        others = sorted(
+            (c for c in cands if c is not top),
+            key=lambda c: (c.significance, c.a_share_relevance, c.impact_scale),
+            reverse=True,
+        )
+        if others:
+            body += "\n## 其他识别事件（按分数排序）\n" + "\n".join(
+                f"- sig {c.significance}/4 · a {c.a_share_relevance}/5 · "
+                f"imp {c.impact_scale}/5 ｜ {c.event.description[:60]}"
+                for c in others[:5]
+            ) + "\n"
+        return f"【本轮无触发】{top.event.description[:30]}", body
+
+    def _push_round_summary(
+        self,
+        *,
+        top,
+        cands: list,
+        collected_n: int,
+        screened_n: int,
+        significance_min: int,
+        a_share_min: int,
+        surprise_min: float,
+        echo=print,
+    ) -> bool:
+        """无前瞻触发时向实时渠道推一条本轮摘要，返回是否有渠道成功。
+
+        纯心跳语义：不标记 seen，不影响下一轮对同一事件的前瞻/推送重试。
+        archive 渠道（FileChannel 报告归档）不参与，避免把摘要写进 reports/monitoring。
+        """
+        realtime = [ch for ch in self.channels if not getattr(ch, "is_archive", False)]
+        if not realtime:
+            return False
+        title, markdown = self._round_summary_markdown(
+            top,
+            cands,
+            collected_n=collected_n,
+            screened_n=screened_n,
+            significance_min=significance_min,
+            a_share_min=a_share_min,
+            surprise_min=surprise_min,
+        )
+        ok_any = False
+        for ch in realtime:
+            try:
+                if ch.push(title=title, markdown=markdown, event=top):
+                    ok_any = True
+            except Exception as ex:
+                echo(f"[monitor] 摘要推送失败（{type(ch).__name__}）: {str(ex)[:60]}")
+        echo(
+            "[monitor] 已推送本轮无触发摘要（实时渠道）"
+            if ok_any
+            else "[monitor] 本轮无触发摘要推送失败（所有实时渠道）"
+        )
+        return ok_any

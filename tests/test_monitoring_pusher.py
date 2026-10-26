@@ -59,7 +59,7 @@ class FakeChannel:
         self.pushed = []
 
     def push(self, *, title, markdown, event):
-        self.pushed.append(event.dedup_key)
+        self.pushed.append(event.dedup_key if event is not None else None)
         return True
 
 
@@ -92,6 +92,62 @@ def test_skips_non_event(tmp_path):
     extractor = FakeExtractor({"n1": None})
     pusher = MonitoringPusher(news, extractor, FakeForward(), dedup, [FakeChannel()])
     assert pusher.run_once(echo=lambda x: None) == 0
+
+
+def test_no_trigger_pushes_round_summary(tmp_path):
+    """无事件达到阈值 → 推一条「本轮最高分事件」摘要（不再只打印），且不标 push。"""
+    dedup = EventDedup(Storage(tmp_path / "t.db"))
+    ch = FakeChannel()
+    cand = _cand("k1", sig=2, a_share=4, surprise_timing=1, surprise_magnitude=1)
+    pusher = MonitoringPusher(FakeNews([_news(1)]), FakeExtractor({"n1": cand}), FakeForward(), dedup, [ch])
+    msgs: list[str] = []
+    assert pusher.run_once(echo=msgs.append) == 0
+    assert ch.pushed == ["k1"], "最高分事件应作为摘要推送一次"
+    assert not dedup.is_seen("k1", purpose="push"), "摘要推送不得标记 push（不影响后续重试）"
+    assert any("摘要" in m for m in msgs)
+
+
+def test_no_trigger_summary_skips_archive_channel(tmp_path):
+    """摘要只发实时渠道，不写 reports/monitoring 归档。"""
+    from eventreplay.pipeline.push_channel import FileChannel
+
+    dedup = EventDedup(Storage(tmp_path / "t.db"))
+    out_dir = tmp_path / "mon"
+    pusher = MonitoringPusher(
+        FakeNews([_news(1)]),
+        FakeExtractor({"n1": _cand("k1", sig=2)}),
+        FakeForward(),
+        dedup,
+        [FileChannel(out_dir)],
+    )
+    assert pusher.run_once(echo=lambda x: None) == 0
+    assert not list(out_dir.glob("*.md")), "归档渠道不应收到无触发摘要"
+
+
+def test_no_events_at_all_sends_heartbeat_summary(tmp_path):
+    """整轮没识别出事件 → 也推一条心跳摘要（避免完全静默）。"""
+    dedup = EventDedup(Storage(tmp_path / "t.db"))
+    ch = FakeChannel()
+    pusher = MonitoringPusher(FakeNews([_news(1)]), FakeExtractor({}), FakeForward(), dedup, [ch])
+    msgs: list[str] = []
+    assert pusher.run_once(echo=msgs.append) == 0
+    assert ch.pushed == [None], "无事件时应推送一条心跳摘要"
+    assert any("无触发" in m for m in msgs)
+
+
+def test_triggered_forward_failure_no_summary(tmp_path):
+    """有事件通过阈值但 forward 失败 → 不发「无触发」摘要（属于失败，不是无触发）。"""
+    dedup = EventDedup(Storage(tmp_path / "t.db"))
+    ch = FakeChannel()
+    pusher = MonitoringPusher(
+        FakeNews([_news(1)]),
+        FakeExtractor({"n1": _cand("k1", sig=4, a_share=5)}),
+        FakeForward(fail_keys={"fwd-k1"}),
+        dedup,
+        [ch],
+    )
+    assert pusher.run_once(echo=lambda x: None) == 0
+    assert ch.pushed == []
 
 
 def test_skips_already_seen(tmp_path):

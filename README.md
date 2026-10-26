@@ -159,7 +159,7 @@ eventreplay monitor --interval 60 --source multi --significance 3 --a-share 4 --
 
 **触发条件**：significance ≥ 3（主线级）AND a_share ≥ 4（A 股可达）AND surprise ≥ 3（突发/超预期）。
 
-**无触发时**：自动输出本轮最高分事件摘要（让你感知市场动态）。
+**无触发时**：自动向飞书/企微推送一条「本轮最高分事件」摘要卡片（同时输出到控制台），避免整天静默；摘要只走实时渠道、不标记已推送，不影响后续重试。整轮没识别出事件时推一条「未识别出重大事件」心跳。
 
 **推送渠道**：FileChannel（文件）+ FeishuChannel（飞书）+ WebhookChannel（企微/钉钉）。
 
